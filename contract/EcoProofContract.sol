@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0
 pragma solidity ^0.8.24;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
@@ -6,7 +6,6 @@ import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 
 contract EcoRewardToken is ERC20, AccessControl {
-    bytes32 public constant REGISTRAR_ROLE = keccak256("REGISTRAR_ROLE");
 
     uint256 public constant REWARD_DECIMALS = 1e18;
 
@@ -22,24 +21,20 @@ contract EcoRewardToken is ERC20, AccessControl {
 
     // MERKLE REWARD
     bytes32 public currentMerkleRoot;
+    string public merkleRootLatestIPFSMetadata;
 
     // TREASURY
 
     address public treasury;
     uint256 public totalETHForBuyback;
+    uint256 public buybackPricePerToken = 0.0001 ether;
 
     // Total amount user has already claimed
     mapping(address => uint256) public totalClaimed;
 
     // =======================
-    // EVENTS
+    //         EVENTS
     // =======================
-
-    event MerkleRootUpdated(bytes32 newRoot);
-    event RewardClaimed(address indexed user, uint256 amount);
-
-    event TreasuryFunded(address indexed from, uint256 amount);
-    event BuybackExecuted(uint256 ethSpent, uint256 tokensBurned);
 
     event DeviceRegistered(
         bytes32 indexed deviceId,
@@ -48,6 +43,23 @@ contract EcoRewardToken is ERC20, AccessControl {
         string metadataURI
     );
     event DeviceStatusChanged(bytes32 indexed deviceId, bool active);
+    event MetadataUpdated(
+    bytes32 indexed deviceId,
+    address indexed owner,
+    string metadataURI
+    );
+    
+    event TreasuryFunded(address indexed from, uint256 amount);
+    event BuybackExecuted(address indexed user, uint256 tokenBurned, uint256 ethSpent);
+    event BuybackPriceUpdated(uint256 newPricePerToken);
+
+    event MerkleRootUpdated(bytes32 indexed newRoot,string ipfsCID, uint256 timestamp);
+    event RewardClaimed(address indexed user, uint256 amount);
+
+
+    // =======================
+    //       CONSTRUCTOR
+    // =======================
 
     constructor(address admin)
         ERC20("EcoReward", "ECR")
@@ -58,7 +70,7 @@ contract EcoRewardToken is ERC20, AccessControl {
     }
 
     // =======================
-    // DEVICE MANAGEMENT
+    //    DEVICE MANAGEMENT
     // =======================
 
     function registerDevice(
@@ -66,7 +78,7 @@ contract EcoRewardToken is ERC20, AccessControl {
         address deviceOwner,
         bytes32 sensorType,
         string calldata metadataURI
-    ) external onlyRole(REGISTRAR_ROLE) {
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
         require(deviceId != bytes32(0), "invalid device id");
         require(deviceOwner != address(0), "invalid owner");
         require(devices[deviceId].owner == address(0), "already registered");
@@ -84,7 +96,7 @@ contract EcoRewardToken is ERC20, AccessControl {
 
     function setDeviceActive(bytes32 deviceId, bool active)
         external
-        onlyRole(REGISTRAR_ROLE)
+        onlyRole(DEFAULT_ADMIN_ROLE)
     {
         require(devices[deviceId].owner != address(0), "unknown device");
         devices[deviceId].active = active;
@@ -95,21 +107,25 @@ contract EcoRewardToken is ERC20, AccessControl {
         external
     {
         require(devices[deviceId].owner != address(0), "unknown device");
-        require(devices[deviceId].owner != msg.sender, "Not the owner");
+        require(devices[deviceId].owner == msg.sender, "Not the owner");
 
         devices[deviceId].metadataURI = metadataURI;
+        emit MetadataUpdated(deviceId, msg.sender, metadataURI);
     }
 
     // =======================
-    // MERKLE REWARD LOGIC
+    //   MERKLE REWARD LOGIC
     // =======================
 
-    function setMerkleRoot(bytes32 newRoot)
+    function setMerkleRoot(bytes32 newRoot,string calldata ipfsCID)
         external
         onlyRole(DEFAULT_ADMIN_ROLE)
     {
+        require(currentMerkleRoot!=newRoot, "invalid merkle root");
         currentMerkleRoot = newRoot;
-        emit MerkleRootUpdated(newRoot);
+        merkleRootLatestIPFSMetadata = ipfsCID;
+    
+        emit MerkleRootUpdated(newRoot,ipfsCID,block.timestamp);
     }
 
     function claim(
@@ -118,10 +134,7 @@ contract EcoRewardToken is ERC20, AccessControl {
     ) external {
         bytes32 leaf = keccak256(abi.encodePacked(msg.sender, cumulativeAmount));
 
-        require(
-            MerkleProof.verify(proof, currentMerkleRoot, leaf),
-            "invalid proof"
-        );
+        require(MerkleProof.verify(proof, currentMerkleRoot, leaf),"invalid proof");
 
         uint256 alreadyClaimed = totalClaimed[msg.sender];
         require(cumulativeAmount > alreadyClaimed, "nothing to claim");
@@ -136,26 +149,46 @@ contract EcoRewardToken is ERC20, AccessControl {
     }
 
     // =======================
-    // TREASURY LOGIC
+    //        TREASURY
     // =======================
 
     receive() external payable {
+        require(msg.value > 0, "Must send ETH");
         totalETHForBuyback += msg.value;
         emit TreasuryFunded(msg.sender, msg.value);
     }
 
-    // Buyback function (simplified for hackathon)
-    // In production, this would interact with a DEX
-    function buybackAndBurn(uint256 tokenAmount)
+    // =======================
+    //     BUYBACK LOGIC
+    // =======================
+
+    function sellTokensForEth(uint256 tokenAmount) 
+        external {
+        require(tokenAmount > 0, "invalid amount");
+        require(buybackPricePerToken > 0, "price is at zero");
+
+        uint256 ethAmount = (tokenAmount * buybackPricePerToken) / 1e18;
+
+        require(address(this).balance >= ethAmount, "not enough ETH in treasury");
+
+        // Transfer tokens from user to contract
+        _transfer(msg.sender, address(this), tokenAmount);
+
+        // Burn tokens
+        _burn(address(this), tokenAmount);
+
+        // Pay user ETH
+        payable(msg.sender).transfer(ethAmount);
+
+        emit BuybackExecuted(msg.sender, tokenAmount, ethAmount);
+    }
+
+     function setBuybackPricePerToken(uint256 newPrice)
         external
         onlyRole(DEFAULT_ADMIN_ROLE)
     {
-        require(balanceOf(address(this)) >= tokenAmount, "not enough tokens");
-
-        //Buying tokens logic
-
-        _burn(address(this), tokenAmount);
-
-        emit BuybackExecuted(0, tokenAmount);
+        require(newPrice > 0, "invalid price");
+        buybackPricePerToken = newPrice;
+        emit BuybackPriceUpdated(newPrice);
     }
 }

@@ -148,19 +148,38 @@
 		"anonymous": false,
 		"inputs": [
 			{
+				"indexed": true,
+				"internalType": "address",
+				"name": "user",
+				"type": "address"
+			},
+			{
 				"indexed": false,
 				"internalType": "uint256",
-				"name": "ethSpent",
+				"name": "tokenBurned",
 				"type": "uint256"
 			},
 			{
 				"indexed": false,
 				"internalType": "uint256",
-				"name": "tokensBurned",
+				"name": "ethSpent",
 				"type": "uint256"
 			}
 		],
 		"name": "BuybackExecuted",
+		"type": "event"
+	},
+	{
+		"anonymous": false,
+		"inputs": [
+			{
+				"indexed": false,
+				"internalType": "uint256",
+				"name": "newPricePerToken",
+				"type": "uint256"
+			}
+		],
+		"name": "BuybackPriceUpdated",
 		"type": "event"
 	},
 	{
@@ -217,13 +236,50 @@
 		"anonymous": false,
 		"inputs": [
 			{
-				"indexed": false,
+				"indexed": true,
 				"internalType": "bytes32",
 				"name": "newRoot",
 				"type": "bytes32"
+			},
+			{
+				"indexed": false,
+				"internalType": "string",
+				"name": "ipfsCID",
+				"type": "string"
+			},
+			{
+				"indexed": false,
+				"internalType": "uint256",
+				"name": "timestamp",
+				"type": "uint256"
 			}
 		],
 		"name": "MerkleRootUpdated",
+		"type": "event"
+	},
+	{
+		"anonymous": false,
+		"inputs": [
+			{
+				"indexed": true,
+				"internalType": "bytes32",
+				"name": "deviceId",
+				"type": "bytes32"
+			},
+			{
+				"indexed": true,
+				"internalType": "address",
+				"name": "owner",
+				"type": "address"
+			},
+			{
+				"indexed": false,
+				"internalType": "string",
+				"name": "metadataURI",
+				"type": "string"
+			}
+		],
+		"name": "MetadataUpdated",
 		"type": "event"
 	},
 	{
@@ -379,19 +435,6 @@
 	},
 	{
 		"inputs": [],
-		"name": "REGISTRAR_ROLE",
-		"outputs": [
-			{
-				"internalType": "bytes32",
-				"name": "",
-				"type": "bytes32"
-			}
-		],
-		"stateMutability": "view",
-		"type": "function"
-	},
-	{
-		"inputs": [],
 		"name": "REWARD_DECIMALS",
 		"outputs": [
 			{
@@ -471,16 +514,16 @@
 		"type": "function"
 	},
 	{
-		"inputs": [
+		"inputs": [],
+		"name": "buybackPricePerToken",
+		"outputs": [
 			{
 				"internalType": "uint256",
-				"name": "tokenAmount",
+				"name": "",
 				"type": "uint256"
 			}
 		],
-		"name": "buybackAndBurn",
-		"outputs": [],
-		"stateMutability": "nonpayable",
+		"stateMutability": "view",
 		"type": "function"
 	},
 	{
@@ -629,6 +672,19 @@
 	},
 	{
 		"inputs": [],
+		"name": "merkleRootLatestIPFSMetadata",
+		"outputs": [
+			{
+				"internalType": "string",
+				"name": "",
+				"type": "string"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
 		"name": "name",
 		"outputs": [
 			{
@@ -707,6 +763,32 @@
 	{
 		"inputs": [
 			{
+				"internalType": "uint256",
+				"name": "tokenAmount",
+				"type": "uint256"
+			}
+		],
+		"name": "sellTokensForEth",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "newPrice",
+				"type": "uint256"
+			}
+		],
+		"name": "setBuybackPricePerToken",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
 				"internalType": "bytes32",
 				"name": "deviceId",
 				"type": "bytes32"
@@ -728,6 +810,11 @@
 				"internalType": "bytes32",
 				"name": "newRoot",
 				"type": "bytes32"
+			},
+			{
+				"internalType": "string",
+				"name": "ipfsCID",
+				"type": "string"
 			}
 		],
 		"name": "setMerkleRoot",
