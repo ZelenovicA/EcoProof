@@ -3,7 +3,7 @@ backend/venv/
 venv/
 .env
 
- Python caching and compiled files
+# Python caching and compiled files
 __pycache__/
 *.pyc
 *.pyo
