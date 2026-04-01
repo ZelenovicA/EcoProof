@@ -18,19 +18,19 @@ const plans = [
   {
     name: "Starter",
     price: "0.01 ETH/mo",
-    features: ["1,000 API calls/day", "5 regions", "JSON format", "Email support"],
+    features: ["1,000 API calls/day", "Basic aggregated data (hourly)", "One country", "Delayed data (5–10 min)", "Email support"],
     popular: false,
   },
   {
     name: "Business",
     price: "0.05 ETH/mo",
-    features: ["50,000 API calls/day", "All regions", "JSON + CSV", "Webhook alerts", "Priority support"],
+    features: ["50,000 API calls/day", "Near real-time data", "Global coverage", "Webhook alerts",  "Priority support"],
     popular: true,
   },
   {
     name: "Enterprise",
     price: "0.15 ETH/mo",
-    features: ["Unlimited calls", "All regions", "All formats", "Custom webhooks", "Dedicated support", "SLA guarantee"],
+    features: ["Unlimited calls", "Near real-time data","Global coverage", "Custom webhooks", "Dedicated support"],
     popular: false,
   },
 ];
@@ -42,7 +42,6 @@ const sampleData = {
   readings: {
     pm25: 12.4,
     pm10: 28.1,
-    co2: 412,
     temperature: 18.3,
     humidity: 62,
   },
@@ -118,7 +117,7 @@ const ApiAccess = () => {
           </h1>
           <p className="text-lg text-muted-foreground">
             Subscribe on-chain and get instant API access to our sensor network across Serbia.
-            Every data point is blockchain-verified and tamper-proof.
+            Every data point is verified and rewarded if honest.
           </p>
         </motion.div>
 
@@ -309,7 +308,7 @@ const ApiAccess = () => {
         {/* Stats */}
         <div className="grid sm:grid-cols-3 gap-6">
           {[
-            { icon: Globe, label: "Regions Covered", value: "12+" },
+            { icon: Globe, label: "Regions Covered", value: "20+" },  
             { icon: BarChart3, label: "Daily Readings", value: "24K" },
             { icon: Zap, label: "Avg Response Time", value: "<50ms" },
           ].map((stat, i) => (

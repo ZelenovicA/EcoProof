@@ -198,13 +198,13 @@ const UserDashboard = () => {
                     Start Earning With Clean Air Data
                   </h2>
                   <p className="text-muted-foreground leading-relaxed">
-                    Our AQ-V2 sensors measure real-time air quality and send data on-chain.
-                    Deploy one anywhere with WiFi, and earn ECR tokens for every verified reading.
+                    Our AQ sensors measure real-time air quality and can be set up in a matter of seconds.
+                    Deploy one anywhere with WiFi, and earn ECR tokens based on every verified reading.
                   </p>
                   <ul className="space-y-2 text-sm text-muted-foreground">
                     <li className="flex items-center gap-2"><CheckCircle className="w-4 h-4 text-primary" /> Compact & plug-and-play</li>
-                    <li className="flex items-center gap-2"><CheckCircle className="w-4 h-4 text-primary" /> On-chain verified readings</li>
-                    <li className="flex items-center gap-2"><CheckCircle className="w-4 h-4 text-primary" /> Earn ECR rewards daily</li>
+                    <li className="flex items-center gap-2"><CheckCircle className="w-4 h-4 text-primary" /> Earn ECR rewards</li>
+                    <li className="flex items-center gap-2"><CheckCircle className="w-4 h-4 text-primary" /> On-chain verified buybacks</li>
                   </ul>
                   <div className="pt-2">
                     <p className="text-2xl font-serif text-foreground">0.05 ETH</p>

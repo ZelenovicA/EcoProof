@@ -8,17 +8,17 @@ const features = [
   {
     icon: Wifi,
     title: "IoT Sensor Network",
-    description: "Deploy our compact air quality sensors anywhere. Real-time data feeds directly to the blockchain.",
+    description: "Deploy our compact air quality sensors anywhere. Earn tokens based on each valid reading.",
   },
   {
     icon: Shield,
-    title: "Verified & Tamper-Proof",
-    description: "Every reading is cryptographically signed and stored on-chain. No manipulation, ever.",
+    title: "Reliable & Tamper-Proof",
+    description: " All company funds are stored on-chain and can only be used for token buybacks. No manipulation, ever.",
   },
   {
     icon: Coins,
     title: "Earn ECR Tokens",
-    description: "Get rewarded for contributing clean data. Sell tokens back or hold for governance rights.",
+    description: "Get rewarded for contributing clean data. Sell tokens back or hold for governance rights in the future.",
   },
 ];
 
@@ -44,7 +44,7 @@ const Index = () => {
             </h1>
             <p className="text-lg text-muted-foreground max-w-md leading-relaxed">
               A blockchain-powered network of air quality sensors, providing transparent, 
-              verifiable environmental data to everyone.
+              reliable environmental data to everyone.
             </p>
             <div className="flex flex-wrap gap-3 pt-2">
               <Link
@@ -57,7 +57,7 @@ const Index = () => {
                 to="/api-access"
                 className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-card border border-border text-foreground font-medium text-sm hover:bg-muted transition-colors"
               >
-                API Access
+                Get Data Access
               </Link>
             </div>
           </motion.div>
@@ -153,7 +153,7 @@ const Index = () => {
               to="/sensors"
               className="inline-flex items-center gap-2 px-6 py-3 rounded-xl eco-gradient text-primary-foreground font-medium text-sm hover:opacity-90 transition-opacity"
             >
-              Register Your Sensor <ArrowRight className="w-4 h-4" />
+              Buy Your First Sensor <ArrowRight className="w-4 h-4" />
             </Link>
           </motion.div>
         </div>
@@ -165,7 +165,7 @@ const Index = () => {
           <Leaf className="w-4 h-4 text-primary" />
           <span>EcoProof © 2026</span>
         </div>
-        <p>Built on Base. Powered by community sensors.</p>
+        <p>Built on Blockchain. Powered by community.</p>
       </footer>
     </div>
   );

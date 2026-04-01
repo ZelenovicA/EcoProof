@@ -9,8 +9,8 @@ import { Button } from "@/components/ui/button";
 const navLinks = [
   { to: "/", label: "Home" },
   { to: "/sensors", label: "My Sensors" },
-  { to: "/api-access", label: "API Access" },
-  { to: "/admin", label: "Admin" },
+  { to: "/api-access", label: "Data Access" },
+  { to: "/admin", label: "Admin Dashboard" },
 ];
 
 const Navbar = () => {
