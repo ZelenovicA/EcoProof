@@ -40,8 +40,8 @@ class HourlyValidationCreate(BaseModel):
     avg_pm25: float
     avg_pm10: Optional[float] = None
     variance_pm25: float
-    is_valid: bool
-    rejection_reason: RejectionReason 
+    total_readings: int
+    valid_readings: int
 
 class HourlyValidationResponse(HourlyValidationCreate):
     id: int

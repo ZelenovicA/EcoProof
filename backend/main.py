@@ -55,52 +55,58 @@ def add_telemetry(data: schemas.SensorDataCreate, db: Session = Depends(get_db))
     db.refresh(new_reading)
     return new_reading
 
-FIXED_TOKEN_POOL_PER_LOCATION = 1000.0
-
-@app.get("/api/sensors/{sensor_id}/weekly-score")
-def get_weekly_score(sensor_id: int, db: Session = Depends(get_db)):
+@app.get("/api/sensors/{sensor_id}/weekly-reward")
+def get_weekly_reward(sensor_id: int, db: Session = Depends(get_db)):
+    WEEKLY_ERC_POOL = 100000.0
+    
     sensor = db.query(Sensor).filter(Sensor.id == sensor_id).first()
     if not sensor:
-        raise HTTPException(status_code=404, detail="Sensor not found.")
+        raise HTTPException(status_code=404, detail="Senzor nije pronađen.")
 
-    end_time = datetime.utcnow()
-    start_time = end_time - timedelta(days=7)
+    start_time = datetime.utcnow() - timedelta(days=7)
+
+    total_locations = db.query(func.count(func.distinct(HourlyValidation.cluster_id))).filter(
+        HourlyValidation.timestamp_hour >= start_time
+    ).scalar() or 1
 
     validations = db.query(HourlyValidation).filter(
         HourlyValidation.sensor_id == sensor_id,
-        HourlyValidation.timestamp_hour >= start_time,
-        HourlyValidation.timestamp_hour <= end_time
+        HourlyValidation.timestamp_hour >= start_time
     ).all()
 
-    total_hours = len(validations)
-    if total_hours == 0:
-         return {"message": "No validation data available for the past week. Score cannot be calculated."}
+    if not validations:
+        return {"message": "No data."}
 
-    valid_hours = sum(1 for v in validations if v.is_valid)
-    accuracy_ratio = valid_hours / total_hours
-
-    cluster_id = validations[0].cluster_id
-
-    sensors_in_location = db.query(func.count(func.distinct(HourlyValidation.sensor_id))).filter(
-        HourlyValidation.cluster_id == cluster_id,
-        HourlyValidation.timestamp_hour >= start_time,
-        HourlyValidation.timestamp_hour <= end_time
-    ).scalar()
-
-    if sensors_in_location == 0:
-        sensors_in_location = 1 
-
-    max_possible_reward = FIXED_TOKEN_POOL_PER_LOCATION / sensors_in_location
+    sum_total_minutes = sum(v.total_readings for v in validations)
+    sum_valid_minutes = sum(v.valid_readings for v in validations)
     
-    earned_tokens = max_possible_reward * accuracy_ratio
+    accuracy_ratio = sum_valid_minutes / sum_total_minutes if sum_total_minutes > 0 else 0
+
+    my_cluster_id = validations[0].cluster_id
+    sensors_in_my_cluster = db.query(func.count(func.distinct(HourlyValidation.sensor_id))).filter(
+        HourlyValidation.cluster_id == my_cluster_id,
+        HourlyValidation.timestamp_hour >= start_time
+    ).scalar() or 1
+
+    pool_per_location = WEEKLY_ERC_POOL / total_locations
+    max_reward_per_sensor = pool_per_location / sensors_in_my_cluster
+    earned_erc = max_reward_per_sensor * accuracy_ratio
 
     return {
-        "sensor_id": sensor_id,
         "device_id": sensor.device_id,
-        "cluster_id": cluster_id,
-        "sensors_in_location": sensors_in_location,
-        "accuracy_percentage": round(accuracy_ratio * 100, 2),
-        "max_possible_tokens": round(max_possible_reward, 2),
-        "earned_tokens": round(earned_tokens, 2),
-        "owner_address": sensor.owner_address
+        "network_stats": {
+            "total_locations": total_locations,
+            "pool_per_location": round(pool_per_location, 2)
+        },
+        "sensor_stats": {
+            "sensors_at_this_location": sensors_in_my_cluster,
+            "weekly_accuracy": f"{round(accuracy_ratio * 100, 2)}%",
+            "max_possible_reward": round(max_reward_per_sensor, 2)
+        },
+        "payout": {
+            "earned_erc": round(earned_erc, 2),
+            "currency": "ERC",
+            "network": "Base",
+            "destination_address": sensor.owner_address
+        }
     }

@@ -4,12 +4,6 @@ from sqlalchemy.orm import relationship
 from database import Base
 import datetime
 
-class RejectionReason(enum.Enum):
-    NONE = "NONE"
-    ZERO_VARIANCE = "ZERO_VARIANCE"
-    OUTLIER = "OUTLIER"
-    INSUFFICIENT_DATA = "INSUFFICIENT_DATA"
-
 class Sensor(Base):
     __tablename__ = "sensors"
 
@@ -47,5 +41,5 @@ class HourlyValidation(Base):
     avg_pm10 = Column(Float, nullable=True)
     variance_pm25 = Column(Float, nullable=False)
     
-    is_valid = Column(Boolean, default=False, nullable=False)
-    rejection_reason = Column(SQLEnum(RejectionReason), default=RejectionReason.NONE, nullable=False)
+    total_readings = Column(Integer, nullable=False, default=0)
+    valid_readings = Column(Integer, nullable=False, default=0)
