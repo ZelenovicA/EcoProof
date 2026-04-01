@@ -1,58 +1,69 @@
-import requests
-import time
 import random
+from datetime import datetime, timedelta
+from sqlalchemy.orm import Session
+from database import SessionLocal, engine
+from models import Base, Sensor, SensorData, HourlyValidation, RejectionReason
 
-API_URL = "http://127.0.0.1:8000"
+def reset_and_seed_db():
+    print("Deleting existing tables...")
+    Base.metadata.drop_all(bind=engine)
+    
+    print("Creating new tables...")
+    Base.metadata.create_all(bind=engine)
 
-SENSORS = [
-    {"device_id": "sensor_grocka_01", "lat": 44.6758, "lon": 20.7175, "owner_address": "0x111111111111"},
-    {"device_id": "sensor_bg_centar", "lat": 44.8125, "lon": 20.4612, "owner_address": "0x222222222222"},
-    {"device_id": "sensor_nbg_01", "lat": 44.8200, "lon": 20.4100, "owner_address": "0x333333333333"}
-]
+    db: Session = SessionLocal()
 
-def register_sensors():
-    print("--- Registering Sensors ---")
-    for sensor in SENSORS:
-        try:
-            response = requests.post(f"{API_URL}/sensors/", json=sensor)
-            if response.status_code == 200:
-                print(f"Registered: {sensor['device_id']}")
-            elif response.status_code == 400:
-                print(f"Already exists: {sensor['device_id']}")
-            else:
-                print(f"Failed to register {sensor['device_id']}: {response.text}")
-        except requests.exceptions.ConnectionError:
-            print("Cannot connect to API. Is the Uvicorn server running?")
-            return False
-    return True
+    base_lat, base_lon = 44.81, 20.46
+    sensors = []
+    for i in range(1, 6):
+        sensor = Sensor(
+            device_id=f"sensor_00{i}",
+            lat=base_lat + random.uniform(-0.01, 0.01),
+            lon=base_lon + random.uniform(-0.01, 0.01),
+            owner_address=f"0xWalletAddress00{i}"
+        )
+        db.add(sensor)
+        sensors.append(sensor)
+    
+    db.commit()
+    for s in sensors:
+        db.refresh(s)
 
-def generate_telemetry():
-    print("\n--- Starting Telemetry Generation (Press CTRL+C to stop) ---")
-    while True:
-        for sensor in SENSORS:
-            base_pm25 = random.uniform(5.0, 45.0)
-            
-            pm10_value = round(base_pm25 * random.uniform(1.2, 1.8), 2)
-            pm25_value = round(base_pm25, 2)
-            
-            payload = {
-                "device_id": sensor["device_id"],
-                "pm25": pm25_value,
-                "pm10": pm10_value
-            }
-            
-            try:
-                response = requests.post(f"{API_URL}/telemetry/", json=payload)
-                if response.status_code == 200:
-                    print(f"[{time.strftime('%H:%M:%S')}] Data sent for {sensor['device_id']} -> PM2.5: {pm25_value}, PM10: {pm10_value}")
-                else:
-                    print(f"Sending failed for {sensor['device_id']}: {response.text}")
-            except Exception as e:
-                print(f"Error occurred: {e}")
-        
-        print("Waiting 10 seconds...\n")
-        time.sleep(10)
+    end_time = datetime.utcnow()
+    start_time = end_time - timedelta(hours=1)
+    readings = []
+    
+    current_time = start_time
+    while current_time <= end_time:
+        for i in range(0, 3):
+            readings.append(SensorData(
+                sensor_id=sensors[i].id,
+                timestamp=current_time,
+                pm25=15.0 + random.uniform(-10.0, 50.0),
+                pm10=20.0 + random.uniform(-15.0, 60.0)
+            ))
+
+        readings.append(SensorData(
+            sensor_id=sensors[3].id,
+            timestamp=current_time,
+            pm25=100.0,
+            pm10=150.0
+        ))
+
+        readings.append(SensorData(
+            sensor_id=sensors[4].id,
+            timestamp=current_time,
+            pm25=85.0 + random.uniform(-25.0, 205.0),
+            pm10=110.0 + random.uniform(-25.0, 205.0)
+        ))
+
+        current_time += timedelta(minutes=1)
+
+    db.add_all(readings)
+    db.commit()
+    
+    print(f"Database is saved. New readings added: {len(readings)} .")
+    db.close()
 
 if __name__ == "__main__":
-    if register_sensors():
-        generate_telemetry()
+    reset_and_seed_db()
