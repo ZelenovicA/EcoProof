@@ -1,3 +1,16 @@
+# Environments
+backend/venv/
+venv/
+.env
+
+ Python caching and compiled files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+pip-log.txt
+
 # Logs
 logs
 *.log
@@ -22,3 +35,9 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# VS Code settings
+.vscode/
