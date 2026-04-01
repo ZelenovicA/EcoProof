@@ -1,0 +1,137 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=Inter:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Fix Tailwind base styles breaking Leaflet tile images */
+.leaflet-container img {
+  max-width: none !important;
+  max-height: none !important;
+}
+
+
+@layer base {
+  :root {
+    --background: 120 20% 98%;
+    --foreground: 150 30% 10%;
+
+    --card: 120 15% 96%;
+    --card-foreground: 150 30% 10%;
+
+    --popover: 120 15% 96%;
+    --popover-foreground: 150 30% 10%;
+
+    --primary: 152 55% 33%;
+    --primary-foreground: 120 20% 98%;
+
+    --secondary: 90 25% 90%;
+    --secondary-foreground: 150 30% 15%;
+
+    --muted: 100 15% 92%;
+    --muted-foreground: 150 10% 45%;
+
+    --accent: 45 80% 55%;
+    --accent-foreground: 150 30% 10%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 120 15% 88%;
+    --input: 120 15% 88%;
+    --ring: 152 55% 33%;
+
+    --radius: 0.75rem;
+
+    --eco-green: 152 55% 33%;
+    --eco-green-light: 145 40% 65%;
+    --eco-green-dark: 155 60% 20%;
+    --eco-earth: 30 35% 40%;
+    --eco-earth-light: 35 30% 75%;
+    --eco-sky: 200 60% 50%;
+    --eco-sky-light: 200 50% 85%;
+    --eco-warm: 45 80% 55%;
+    --eco-cream: 45 30% 96%;
+
+    --sidebar-background: 120 15% 96%;
+    --sidebar-foreground: 150 30% 10%;
+    --sidebar-primary: 152 55% 33%;
+    --sidebar-primary-foreground: 120 20% 98%;
+    --sidebar-accent: 90 25% 90%;
+    --sidebar-accent-foreground: 150 30% 15%;
+    --sidebar-border: 120 15% 88%;
+    --sidebar-ring: 152 55% 33%;
+  }
+
+  .dark {
+    --background: 150 20% 6%;
+    --foreground: 120 15% 92%;
+    --eco-cream: 45 10% 12%;
+    --eco-sky-light: 200 15% 15%;
+    --card: 150 18% 10%;
+    --card-foreground: 120 15% 92%;
+    --popover: 150 18% 10%;
+    --popover-foreground: 120 15% 92%;
+    --primary: 152 50% 45%;
+    --primary-foreground: 150 20% 6%;
+    --secondary: 150 15% 18%;
+    --secondary-foreground: 120 15% 92%;
+    --muted: 150 15% 18%;
+    --muted-foreground: 120 10% 55%;
+    --accent: 45 70% 50%;
+    --accent-foreground: 150 20% 6%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 150 15% 18%;
+    --input: 150 15% 18%;
+    --ring: 152 50% 45%;
+    --sidebar-background: 150 18% 8%;
+    --sidebar-foreground: 120 15% 92%;
+    --sidebar-primary: 152 50% 45%;
+    --sidebar-primary-foreground: 150 20% 6%;
+    --sidebar-accent: 150 15% 15%;
+    --sidebar-accent-foreground: 120 15% 92%;
+    --sidebar-border: 150 15% 18%;
+    --sidebar-ring: 152 50% 45%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans;
+  }
+
+  h1, h2, h3, h4 {
+    font-family: 'DM Serif Display', serif;
+  }
+}
+
+@layer utilities {
+  .eco-gradient {
+    background: linear-gradient(135deg, hsl(var(--eco-green)) 0%, hsl(var(--eco-green-dark)) 100%);
+  }
+
+  .eco-gradient-soft {
+    background: linear-gradient(135deg, hsl(var(--eco-cream)) 0%, hsl(var(--eco-sky-light)) 50%, hsl(var(--secondary)) 100%);
+  }
+
+  .eco-text-gradient {
+    background: linear-gradient(135deg, hsl(var(--eco-green)) 0%, hsl(var(--eco-green-light)) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .eco-glow {
+    box-shadow: 0 0 40px -10px hsl(var(--eco-green) / 0.3);
+  }
+
+  .eco-card {
+    @apply bg-card border border-border rounded-xl p-6;
+    box-shadow: 0 4px 20px -5px hsl(var(--eco-green) / 0.08);
+  }
+}
