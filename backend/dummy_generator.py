@@ -2,7 +2,7 @@ import random
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from database import SessionLocal, engine
-from models import Base, Sensor, SensorData, HourlyValidation, RejectionReason
+from models import Base, Sensor, SensorData, HourlyValidation
 
 def reset_and_seed_db():
     print("Deleting existing tables...")
