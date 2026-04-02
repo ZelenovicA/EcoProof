@@ -1,0 +1,8 @@
+__pycache__
+*.pyc
+venv
+.env
+.git
+dummy_generator.py
+seed_weekly.py
+seed_weekly_v2.py

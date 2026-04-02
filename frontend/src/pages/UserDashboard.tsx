@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Wifi, MapPin, Coins, Edit, CheckCircle, AlertCircle,
@@ -10,13 +10,15 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useAccount, useReadContract, useWriteContract, useWaitForTransactionReceipt } from "wagmi";
 import { ConnectButton } from "@rainbow-me/rainbowkit";
-import { formatEther, parseEther, keccak256, encodePacked } from "viem";
-import { ECOPROOF_CONTRACT_ADDRESS, ECOPROOF_ABI } from "@/config/contract";
+import { formatEther, parseEther, keccak256, encodePacked, stringToHex, zeroHash } from "viem";
+import { toast } from "sonner";
+import { ECOPROOF_CONTRACT_ADDRESS, ECOPROOF_ABI, IS_CONTRACT_CONFIGURED } from "@/config/contract";
 import LocationPicker from "@/components/LocationPicker";
 
 interface LocalSensor {
   id: string;
-  deviceId: string;
+  deviceId: string; // short display
+  deviceIdRaw: `0x${string}`; // full bytes32 for contract writes
   lat: string;
   lng: string;
   active: boolean;
@@ -27,12 +29,33 @@ interface LocalSensor {
 type OrderStatus = "none" | "shipping" | "arrived";
 type AdditionalOrderStatus = "none" | "ordering" | "shipping" | "arrived";
 
+const toScaledCoordinate = (value: string) => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return null;
+  return BigInt(Math.round(parsed * 1_000_000));
+};
+
+const shortDeviceId = (deviceId: string) => `${deviceId.slice(0, 10)}...${deviceId.slice(-8)}`;
+
+const toErrorMessage = (error: unknown) =>
+  error instanceof Error && error.message ? error.message : "Transaction failed";
+
 const UserDashboard = () => {
   const { address, isConnected } = useAccount();
   const [sensors, setSensors] = useState<LocalSensor[]>([]);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [newLat, setNewLat] = useState("");
   const [newLng, setNewLng] = useState("");
+  const [pendingRegistration, setPendingRegistration] = useState<{
+    deviceId: `0x${string}`;
+    lat: string;
+    lng: string;
+  } | null>(null);
+  const [pendingLocationUpdate, setPendingLocationUpdate] = useState<{
+    id: string;
+    lat: string;
+    lng: string;
+  } | null>(null);
 
   // Registration
   const [activationCode, setActivationCode] = useState("");
@@ -46,7 +69,6 @@ const UserDashboard = () => {
   const [shippingCountry, setShippingCountry] = useState("");
   const [shippingZip, setShippingZip] = useState("");
   const [additionalOrderStatus, setAdditionalOrderStatus] = useState<AdditionalOrderStatus>("none");
-  const [showBuyAnother, setShowBuyAnother] = useState(false);
   // Claim
   const [showClaimModal, setShowClaimModal] = useState(false);
   const [isLoadingProof, setIsLoadingProof] = useState(false);
@@ -68,13 +90,37 @@ const UserDashboard = () => {
     query: { enabled: !!address },
   });
 
+  const { data: canRegisterDevice } = useReadContract({
+    address: ECOPROOF_CONTRACT_ADDRESS,
+    abi: ECOPROOF_ABI,
+    functionName: "hasRole",
+    args: address ? [zeroHash, address] : undefined,
+    query: { enabled: !!address && IS_CONTRACT_CONFIGURED },
+  });
+
   // Contract writes
-  const { writeContract: writeClaim, data: claimHash, isPending: isClaiming } = useWriteContract();
+  const { writeContractAsync: writeClaim, data: claimHash, isPending: isClaiming } = useWriteContract();
   const { isLoading: isClaimConfirming, isSuccess: isClaimConfirmed } = useWaitForTransactionReceipt({ hash: claimHash });
 
-  const { writeContract: writeUpdateMetadata, isPending: isUpdating } = useWriteContract();
-  const { writeContract: writeSellTokens, data: sellHash, isPending: isSelling } = useWriteContract();
-  const { isLoading: isSellConfirming, isSuccess: isSellConfirmed } = useWaitForTransactionReceipt({ hash: sellHash });
+  const {
+    writeContractAsync: writeRegisterDevice,
+    data: registerHash,
+    isPending: isRegistering,
+  } = useWriteContract();
+  const {
+    isLoading: isRegisterConfirming,
+    isSuccess: isRegisterConfirmed,
+  } = useWaitForTransactionReceipt({ hash: registerHash });
+
+  const {
+    writeContractAsync: writeUpdateMetadata,
+    data: updateMetadataHash,
+    isPending: isUpdating,
+  } = useWriteContract();
+  const {
+    isLoading: isUpdateConfirming,
+    isSuccess: isUpdateConfirmed,
+  } = useWaitForTransactionReceipt({ hash: updateMetadataHash });
 
   const formattedBalance = tokenBalance ? formatEther(tokenBalance as bigint) : "0.00";
   const formattedClaimed = totalClaimedData ? formatEther(totalClaimedData as bigint) : "0.00";
@@ -89,43 +135,81 @@ const UserDashboard = () => {
     setOrderStatus("arrived");
   };
 
-  const handleRegister = () => {
+  const handleRegister = async () => {
+    if (!address) return;
     if (activationCode.length !== 6 || !regLat || !regLng) return;
-    // In production, this would call the contract's registerDevice via the admin backend
-    const deviceId = keccak256(encodePacked(["string"], [activationCode]));
-    const newSensor: LocalSensor = {
-      id: String(sensors.length + 1),
-      deviceId: `${deviceId.slice(0, 8)}...${deviceId.slice(-6)}`,
-      lat: regLat,
-      lng: regLng,
-      active: true,
-      registeredAt: new Date().toISOString().split("T")[0],
-      sensorType: "AQ-V2",
-    };
-    setSensors([...sensors, newSensor]);
-    setActivationCode("");
-    setRegLat("");
-    setRegLng("");
-    setOrderStatus("none");
+    if (!IS_CONTRACT_CONFIGURED) {
+      toast.error("Contract address is not configured.");
+      return;
+    }
+    if (!canRegisterDevice) {
+      toast.error("Registering a device requires admin role in the contract.");
+      return;
+    }
+
+    const scaledLat = toScaledCoordinate(regLat);
+    const scaledLng = toScaledCoordinate(regLng);
+    if (scaledLat === null || scaledLng === null) {
+      toast.error("Invalid coordinates.");
+      return;
+    }
+
+    const deviceId = keccak256(encodePacked(["string"], [activationCode])) as `0x${string}`;
+    const sensorType = stringToHex("AQ-V2", { size: 32 });
+
+    try {
+      setPendingRegistration({ deviceId, lat: regLat, lng: regLng });
+      await writeRegisterDevice({
+        address: ECOPROOF_CONTRACT_ADDRESS,
+        abi: ECOPROOF_ABI,
+        functionName: "registerDevice",
+        args: [deviceId, address, sensorType, scaledLat, scaledLng],
+      });
+      toast.message("Register transaction submitted.");
+    } catch (error) {
+      setPendingRegistration(null);
+      toast.error(toErrorMessage(error));
+    }
   };
 
-  const handleUpdateLocation = (id: string, deviceIdFull: string) => {
-    // Call updateMetadata on-chain with new lat/lng as metadataURI
-    const metadataURI = JSON.stringify({ lat: newLat, lng: newLng });
-    writeUpdateMetadata({
-      address: ECOPROOF_CONTRACT_ADDRESS,
-      abi: ECOPROOF_ABI as any,
-      functionName: "updateMetadata",
-      args: [deviceIdFull as `0x${string}`, metadataURI],
-    } as any);
-    setSensors(sensors.map(s => s.id === id ? { ...s, lat: newLat, lng: newLng } : s));
-    setEditingId(null);
-    setNewLat("");
-    setNewLng("");
+  const handleUpdateLocation = async (id: string) => {
+    if (!IS_CONTRACT_CONFIGURED) {
+      toast.error("Contract address is not configured.");
+      return;
+    }
+
+    const target = sensors.find((sensor) => sensor.id === id);
+    if (!target) return;
+
+    const scaledLat = toScaledCoordinate(newLat);
+    const scaledLng = toScaledCoordinate(newLng);
+    if (scaledLat === null || scaledLng === null) {
+      toast.error("Invalid coordinates.");
+      return;
+    }
+
+    try {
+      setPendingLocationUpdate({ id, lat: newLat, lng: newLng });
+      await writeUpdateMetadata({
+        address: ECOPROOF_CONTRACT_ADDRESS,
+        abi: ECOPROOF_ABI,
+        functionName: "updateMetadata",
+        args: [target.deviceIdRaw, scaledLat, scaledLng],
+      });
+      toast.message("Update location transaction submitted.");
+    } catch (error) {
+      setPendingLocationUpdate(null);
+      toast.error(toErrorMessage(error));
+    }
   };
 
   const handleClaim = async () => {
     if (!address) return;
+    if (!IS_CONTRACT_CONFIGURED) {
+      toast.error("Contract address is not configured.");
+      return;
+    }
+
     setIsLoadingProof(true);
     try {
       // In production, this fetches from the rewards API/IPFS
@@ -138,16 +222,63 @@ const UserDashboard = () => {
         "0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd",
       ];
 
-      writeClaim({
+      await writeClaim({
         address: ECOPROOF_CONTRACT_ADDRESS,
-        abi: ECOPROOF_ABI as any,
+        abi: ECOPROOF_ABI,
         functionName: "claim",
         args: [parseEther(simulatedAmount), simulatedProof],
-      } as any);
+      });
+      toast.message("Claim transaction submitted.");
+    } catch (error) {
+      toast.error(toErrorMessage(error));
     } finally {
       setIsLoadingProof(false);
     }
   };
+
+  useEffect(() => {
+    if (!isRegisterConfirmed || !pendingRegistration) return;
+
+    setSensors((prev) => [
+      ...prev,
+      {
+        id: String(prev.length + 1),
+        deviceId: shortDeviceId(pendingRegistration.deviceId),
+        deviceIdRaw: pendingRegistration.deviceId,
+        lat: pendingRegistration.lat,
+        lng: pendingRegistration.lng,
+        active: true,
+        registeredAt: new Date().toISOString().split("T")[0],
+        sensorType: "AQ-V2",
+      },
+    ]);
+
+    setActivationCode("");
+    setRegLat("");
+    setRegLng("");
+    setOrderStatus("none");
+    setAdditionalOrderStatus("none");
+    setPendingRegistration(null);
+    toast.success("Sensor registered on-chain.");
+  }, [isRegisterConfirmed, pendingRegistration]);
+
+  useEffect(() => {
+    if (!isUpdateConfirmed || !pendingLocationUpdate) return;
+
+    setSensors((prev) =>
+      prev.map((sensor) =>
+        sensor.id === pendingLocationUpdate.id
+          ? { ...sensor, lat: pendingLocationUpdate.lat, lng: pendingLocationUpdate.lng }
+          : sensor,
+      ),
+    );
+
+    setEditingId(null);
+    setNewLat("");
+    setNewLng("");
+    setPendingLocationUpdate(null);
+    toast.success("Device location updated on-chain.");
+  }, [isUpdateConfirmed, pendingLocationUpdate]);
 
   if (!isConnected) {
     return (
@@ -331,10 +462,10 @@ const UserDashboard = () => {
                         </div>
                         <Button
                           onClick={handleRegister}
-                          disabled={activationCode.length !== 6 || !regLat || !regLng}
+                          disabled={activationCode.length !== 6 || !regLat || !regLng || isRegistering || isRegisterConfirming}
                           className="w-full eco-gradient text-primary-foreground hover:opacity-90 border-0"
                         >
-                          Register Sensor
+                          {isRegistering ? "Confirm..." : isRegisterConfirming ? "Confirming..." : "Register Sensor"}
                         </Button>
                       </motion.div>
                     )}
@@ -501,8 +632,13 @@ const UserDashboard = () => {
                                 <div className="flex items-center gap-2">
                                   <Input value={newLat} onChange={(e) => setNewLat(e.target.value)} placeholder="Lat" type="number" step="any" className="h-7 w-24 text-sm bg-background" />
                                   <Input value={newLng} onChange={(e) => setNewLng(e.target.value)} placeholder="Lng" type="number" step="any" className="h-7 w-24 text-sm bg-background" />
-                                  <Button size="sm" variant="outline" onClick={() => handleUpdateLocation(sensor.id, sensor.deviceId)} disabled={isUpdating}>
-                                    {isUpdating ? "..." : "Save"}
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => handleUpdateLocation(sensor.id)}
+                                    disabled={isUpdating || isUpdateConfirming}
+                                  >
+                                    {isUpdating ? "Confirm..." : isUpdateConfirming ? "Confirming..." : "Save"}
                                   </Button>
                                   <Button size="sm" variant="ghost" onClick={() => setEditingId(null)}>Cancel</Button>
                                 </div>
@@ -648,11 +784,11 @@ const UserDashboard = () => {
                     <LocationPicker lat={regLat} lng={regLng} onLatChange={setRegLat} onLngChange={setRegLng} />
                   </div>
                   <Button
-                    onClick={() => { handleRegister(); setAdditionalOrderStatus("none"); }}
-                    disabled={activationCode.length !== 6 || !regLat || !regLng}
+                    onClick={handleRegister}
+                    disabled={activationCode.length !== 6 || !regLat || !regLng || isRegistering || isRegisterConfirming}
                     className="eco-gradient text-primary-foreground hover:opacity-90 border-0"
                   >
-                    Register Sensor
+                    {isRegistering ? "Confirm..." : isRegisterConfirming ? "Confirming..." : "Register Sensor"}
                   </Button>
                 </CardContent>
               </Card>

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import { Shield, Coins, Power, Upload, AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -7,82 +7,155 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useAccount, useReadContract, useWriteContract, useWaitForTransactionReceipt } from "wagmi";
 import { ConnectButton } from "@rainbow-me/rainbowkit";
-import { parseEther, formatEther } from "viem";
-import { ECOPROOF_CONTRACT_ADDRESS, ECOPROOF_ABI } from "@/config/contract";
+import { formatEther, hexToString, zeroAddress, zeroHash, parseEther } from "viem";
+import { toast } from "sonner";
+import { ECOPROOF_CONTRACT_ADDRESS, ECOPROOF_ABI, IS_CONTRACT_CONFIGURED } from "@/config/contract";
+import { contractService } from "@/services/contractService";
 
-interface AdminDevice {
-  deviceId: string;
-  owner: string;
-  location: string;
-  active: boolean;
-  sensorType: string;
-}
+const isBytes32 = (value: string) => /^0x[a-fA-F0-9]{64}$/.test(value);
 
-const MOCK_DEVICES: AdminDevice[] = [
-  { deviceId: "0xab12...ef34", owner: "0x1234...5678", location: "Belgrade", active: true, sensorType: "AQ-V2" },
-  { deviceId: "0xcd56...gh78", owner: "0x9abc...def0", location: "Niš", active: true, sensorType: "AQ-V2" },
-  { deviceId: "0xef90...ij12", owner: "0x5678...1234", location: "Novi Sad", active: false, sensorType: "AQ-V1" },
-];
+const decodeSensorType = (value: string) => {
+  try {
+    const decoded = hexToString(value as `0x${string}`, { size: 32 }).split("\0").join("").trim();
+    return decoded || "N/A";
+  } catch {
+    return "N/A";
+  }
+};
 
-const ADMIN_ADDRESS = "0x0000000000000000000000000000000000000000"; // Replace with actual admin address
+const formatCoordinate = (scaled: bigint | undefined) => {
+  if (scaled === undefined) return "N/A";
+  return (Number(scaled) / 1_000_000).toFixed(6);
+};
 
 const Admin = () => {
   const { address, isConnected } = useAccount();
   const [merkleRoot, setMerkleRoot] = useState("");
   const [ipfsCID, setIpfsCID] = useState("");
   const [buybackPrice, setBuybackPrice] = useState("");
-  const [devices, setDevices] = useState(MOCK_DEVICES);
+  const [deviceIdInput, setDeviceIdInput] = useState("");
+  
+  const [pendingDeviceToggle, setPendingDeviceToggle] = useState<{
+    deviceId: `0x${string}`;
+    nextActive: boolean;
+  } | null>(null);
 
-  // Contract reads
+  const normalizedDeviceId = useMemo(() => {
+    const trimmed = deviceIdInput.trim();
+    return isBytes32(trimmed) ? (trimmed as `0x${string}`) : undefined;
+  }, [deviceIdInput]);
+
+  // Contract reads with wagmi
   const { data: currentMerkleRoot } = useReadContract({
     address: ECOPROOF_CONTRACT_ADDRESS,
     abi: ECOPROOF_ABI,
     functionName: "currentMerkleRoot",
+    query: { enabled: IS_CONTRACT_CONFIGURED },
   });
 
-  const { data: currentBuybackPrice } = useReadContract({
+  const { data: currentBuybackPriceRaw } = useReadContract({
     address: ECOPROOF_CONTRACT_ADDRESS,
     abi: ECOPROOF_ABI,
     functionName: "buybackPricePerToken",
+    query: { enabled: IS_CONTRACT_CONFIGURED },
   });
 
-  // Contract writes
-  const { writeContract: writeSetMerkle, data: merkleHash, isPending: isMerklePending } = useWriteContract();
+  const { data: hasAdminRole } = useReadContract({
+    address: ECOPROOF_CONTRACT_ADDRESS,
+    abi: ECOPROOF_ABI,
+    functionName: "hasRole",
+    args: address ? [zeroHash, address] : undefined,
+    query: { enabled: !!address && IS_CONTRACT_CONFIGURED },
+  });
+
+  const { data: selectedDevice } = useReadContract({
+    address: ECOPROOF_CONTRACT_ADDRESS,
+    abi: ECOPROOF_ABI,
+    functionName: "devices",
+    args: normalizedDeviceId ? [normalizedDeviceId] : undefined,
+    query: { enabled: !!normalizedDeviceId && IS_CONTRACT_CONFIGURED },
+  });
+
+  // Contract writes with wagmi
+  const { writeContractAsync: setMerkleRootAsync, data: merkleHash, isPending: isMerklePending } = useWriteContract();
   const { isLoading: isMerkleConfirming, isSuccess: isMerkleConfirmed } = useWaitForTransactionReceipt({ hash: merkleHash });
 
-  const { writeContract: writeSetBuyback, data: buybackHash, isPending: isBuybackPending } = useWriteContract();
+  const { writeContractAsync: setBuybackPriceAsync, data: buybackHash, isPending: isBuybackPending } = useWriteContract();
   const { isLoading: isBuybackConfirming, isSuccess: isBuybackConfirmed } = useWaitForTransactionReceipt({ hash: buybackHash });
 
-  const { writeContract: writeSetDeviceActive, isPending: isDevicePending } = useWriteContract();
+  const { writeContractAsync: setDeviceActiveAsync, data: deviceHash, isPending: isDevicePending } = useWriteContract();
+  const { isLoading: isDeviceConfirming, isSuccess: isDeviceConfirmed } = useWaitForTransactionReceipt({ hash: deviceHash });
 
-  const handleSetMerkleRoot = () => {
-    if (!merkleRoot || !ipfsCID) return;
-    writeSetMerkle({
-      address: ECOPROOF_CONTRACT_ADDRESS,
-      abi: ECOPROOF_ABI as any,
-      functionName: "setMerkleRoot",
-      args: [merkleRoot as `0x${string}`, ipfsCID],
-    } as any);
+  const currentBuybackPrice = currentBuybackPriceRaw ? formatEther(currentBuybackPriceRaw as bigint) : "0";
+  const deviceExists = selectedDevice && selectedDevice[0] && selectedDevice[0] !== zeroAddress;
+  const selectedOwner = (selectedDevice as any)?.[0];
+  const selectedActive = (selectedDevice as any)?.[1];
+  const selectedSensorTypeRaw = (selectedDevice as any)?.[3];
+  const selectedLatitude = (selectedDevice as any)?.[4];
+  const selectedLongitude = (selectedDevice as any)?.[5];
+
+  // Merkle Root
+  const handleSetMerkleRoot = async () => {
+    if (!merkleRoot || !ipfsCID || !address || !IS_CONTRACT_CONFIGURED) return;
+    try {
+      await setMerkleRootAsync({
+        address: ECOPROOF_CONTRACT_ADDRESS,
+        abi: ECOPROOF_ABI,
+        functionName: "setMerkleRoot",
+        args: [merkleRoot as `0x${string}`, ipfsCID],
+      });
+      toast.message("Merkle root transaction submitted.");
+      setMerkleRoot("");
+      setIpfsCID("");
+    } catch (error) {
+      toast.error(contractService.parseError(error));
+    }
   };
 
-  const handleSetBuybackPrice = () => {
-    if (!buybackPrice) return;
-    writeSetBuyback({
-      address: ECOPROOF_CONTRACT_ADDRESS,
-      abi: ECOPROOF_ABI as any,
-      functionName: "setBuybackPricePerToken",
-      args: [parseEther(buybackPrice)],
-    } as any);
+  // Buyback Price
+  const handleSetBuybackPrice = async () => {
+    if (!buybackPrice || !address || !IS_CONTRACT_CONFIGURED) return;
+    try {
+      await setBuybackPriceAsync({
+        address: ECOPROOF_CONTRACT_ADDRESS,
+        abi: ECOPROOF_ABI,
+        functionName: "setBuybackPricePerToken",
+        args: [parseEther(buybackPrice)],
+      });
+      toast.message("Buyback price update transaction submitted.");
+      setBuybackPrice("");
+    } catch (error) {
+      toast.error(contractService.parseError(error));
+    }
   };
 
-  const handleToggleDevice = (deviceId: string, currentActive: boolean) => {
-    writeSetDeviceActive({
-      address: ECOPROOF_CONTRACT_ADDRESS,
-      abi: ECOPROOF_ABI as any,
-      functionName: "setDeviceActive",
-      args: [deviceId as `0x${string}`, !currentActive],
-    } as any);
-    setDevices(devices.map(d => d.deviceId === deviceId ? { ...d, active: !d.active } : d));
+  // Device Toggle
+  const handleToggleDevice = async () => {
+    if (!normalizedDeviceId) {
+      toast.error("Enter a valid bytes32 device ID.");
+      return;
+    }
+    if (!deviceExists) {
+      toast.error("Device is not registered on-chain.");
+      return;
+    }
+    if (!address || !IS_CONTRACT_CONFIGURED) return;
+    
+    const nextActive = !selectedActive;
+    try {
+      setPendingDeviceToggle({ deviceId: normalizedDeviceId, nextActive });
+      await setDeviceActiveAsync({
+        address: ECOPROOF_CONTRACT_ADDRESS,
+        abi: ECOPROOF_ABI,
+        functionName: "setDeviceActive",
+        args: [normalizedDeviceId, nextActive],
+      });
+      toast.message("Device status transaction submitted.");
+    } catch (error) {
+      toast.error(contractService.parseError(error));
+    } finally {
+      setPendingDeviceToggle(null);
+    }
   };
 
   const handleAutoGenerate = () => {
@@ -90,8 +163,7 @@ const Admin = () => {
     setIpfsCID("Qm" + Array.from({ length: 44 }, () => "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"[Math.floor(Math.random() * 62)]).join(""));
   };
 
-  // Simple admin check — in production use contract's hasRole
-  const isAdmin = isConnected; // For now allow any connected wallet; replace with proper check
+  const isAdmin = hasAdminRole;
 
   if (!isConnected) {
     return (
@@ -116,9 +188,7 @@ const Admin = () => {
     );
   }
 
-  const formattedBuyback = currentBuybackPrice
-    ? formatEther(currentBuybackPrice as bigint)
-    : "0.0001";
+  const formattedBuyback = currentBuybackPrice || "0.0001";
 
   return (
     <div className="min-h-screen pt-16">
@@ -126,7 +196,9 @@ const Admin = () => {
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
           <div className="flex items-center gap-2">
             <h1 className="text-3xl md:text-4xl font-serif text-foreground">Admin Panel</h1>
-            <Badge className="bg-destructive text-destructive-foreground">Admin Only</Badge>
+            <Badge className={isAdmin ? "bg-primary/10 text-primary" : "bg-destructive text-destructive-foreground"}>
+              {isAdmin ? "Admin" : "No Admin Role"}
+            </Badge>
           </div>
           <p className="text-muted-foreground mt-1">
             Connected as <code className="text-xs font-mono text-foreground">{address?.slice(0, 6)}...{address?.slice(-4)}</code>
@@ -172,7 +244,7 @@ const Admin = () => {
                 <Button
                   className="eco-gradient text-primary-foreground hover:opacity-90 border-0 w-full"
                   onClick={handleSetMerkleRoot}
-                  disabled={!merkleRoot || !ipfsCID || isMerklePending || isMerkleConfirming}
+                  disabled={!isAdmin || !merkleRoot || !ipfsCID || isMerklePending || isMerkleConfirming}
                 >
                   {isMerklePending ? "Confirm..." : isMerkleConfirming ? "Confirming..." : isMerkleConfirmed ? "✓ Done" : "Submit On-Chain"}
                 </Button>
@@ -205,7 +277,7 @@ const Admin = () => {
               <Button
                 className="eco-gradient text-primary-foreground hover:opacity-90 border-0 w-full"
                 onClick={handleSetBuybackPrice}
-                disabled={!buybackPrice || isBuybackPending || isBuybackConfirming}
+                disabled={!isAdmin || !buybackPrice || isBuybackPending || isBuybackConfirming}
               >
                 {isBuybackPending ? "Confirm..." : isBuybackConfirming ? "Confirming..." : isBuybackConfirmed ? "✓ Updated" : "Update Buyback Price"}
               </Button>
@@ -218,46 +290,53 @@ const Admin = () => {
           <h2 className="text-2xl font-serif text-foreground flex items-center gap-2">
             <Power className="w-5 h-5 text-primary" /> Device Management
           </h2>
-          <div className="grid gap-3">
-            {devices.map((device, i) => (
-              <motion.div
-                key={device.deviceId}
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: i * 0.05 }}
+
+          <Card className="bg-card border-border">
+            <CardContent className="pt-6 space-y-4">
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-foreground">Device ID (bytes32)</label>
+                <Input
+                  value={deviceIdInput}
+                  onChange={(e) => setDeviceIdInput(e.target.value)}
+                  placeholder="0x... (64 hex chars)"
+                  className="bg-background font-mono text-sm"
+                />
+                {deviceIdInput && !normalizedDeviceId && (
+                  <p className="text-xs text-muted-foreground">Enter full bytes32 value like <code className="font-mono">0x + 64 hex chars</code>.</p>
+                )}
+              </div>
+
+              {normalizedDeviceId && (
+                <div className="rounded-lg border border-border p-4 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <code className="text-xs md:text-sm font-mono text-foreground break-all">{normalizedDeviceId}</code>
+                    {deviceExists && (
+                      <Badge variant={selectedActive ? "default" : "secondary"} className={selectedActive ? "bg-primary text-primary-foreground" : ""}>
+                        {selectedActive ? "Active" : "Inactive"}
+                      </Badge>
+                    )}
+                  </div>
+                  <p className="text-sm text-muted-foreground">Owner: {selectedOwner ?? "-"}</p>
+                  <p className="text-sm text-muted-foreground">Sensor Type: {selectedSensorTypeRaw ? decodeSensorType(selectedSensorTypeRaw) : "-"}</p>
+                  <p className="text-sm text-muted-foreground">Location: {formatCoordinate(selectedLatitude)}, {formatCoordinate(selectedLongitude)}</p>
+                  {!deviceExists && <p className="text-sm text-destructive">This device is not registered on-chain.</p>}
+                </div>
+              )}
+
+              <Button
+                variant={selectedActive ? "destructive" : "outline"}
+                onClick={handleToggleDevice}
+                disabled={!isAdmin || !deviceExists || isLoading}
+                className="w-full sm:w-auto"
               >
-                <Card className="bg-card border-border">
-                  <CardContent className="pt-6">
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-2">
-                          <code className="text-sm font-mono text-foreground">{device.deviceId}</code>
-                          <Badge variant={device.active ? "default" : "secondary"} className={device.active ? "bg-primary text-primary-foreground" : ""}>
-                            {device.active ? "Active" : "Inactive"}
-                          </Badge>
-                        </div>
-                        <p className="text-xs text-muted-foreground">
-                          Owner: {device.owner} · {device.location} · {device.sensorType}
-                        </p>
-                      </div>
-                      <Button
-                        variant={device.active ? "destructive" : "outline"}
-                        size="sm"
-                        onClick={() => handleToggleDevice(device.deviceId, device.active)}
-                        disabled={isDevicePending}
-                      >
-                        {device.active ? (
-                          <><AlertTriangle className="w-3.5 h-3.5 mr-1" /> Deactivate</>
-                        ) : (
-                          <><Power className="w-3.5 h-3.5 mr-1" /> Activate</>
-                        )}
-                      </Button>
-                    </div>
-                  </CardContent>
-                </Card>
-              </motion.div>
-            ))}
-          </div>
+                {selectedActive ? (
+                  <><AlertTriangle className="w-3.5 h-3.5 mr-1" /> Deactivate</>
+                ) : (
+                  <><Power className="w-3.5 h-3.5 mr-1" /> Activate</>
+                )}
+              </Button>
+            </CardContent>
+          </Card>
         </div>
       </div>
     </div>

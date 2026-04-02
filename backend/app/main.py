@@ -1,10 +1,10 @@
 from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy.orm import Session
-import models, schemas, database
+from . import models, schemas, database
 from datetime import datetime, timedelta
 from sqlalchemy import func
-from models import Sensor, HourlyValidation
-from database import SessionLocal
+from .models import Sensor, HourlyValidation
+from .database import SessionLocal
 
 models.Base.metadata.create_all(bind=database.engine)
 

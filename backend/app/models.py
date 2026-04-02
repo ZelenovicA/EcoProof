@@ -1,7 +1,7 @@
 import enum
 from sqlalchemy import Column, Integer, Float, Boolean, String, DateTime, ForeignKey, Enum as SQLEnum
 from sqlalchemy.orm import relationship
-from database import Base
+from .database import Base
 import datetime
 
 class Sensor(Base):

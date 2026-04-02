@@ -1,11 +1,15 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Key, BarChart3, Globe, Zap, Check, Copy, CheckCircle, ArrowUpRight, Shield } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { useAccount, useWriteContract, useWaitForTransactionReceipt } from "wagmi";
+import { useAccount, useSendTransaction, useWaitForTransactionReceipt } from "wagmi";
 import { ConnectButton } from "@rainbow-me/rainbowkit";
+import { parseEther } from "viem";
+import { toast } from "sonner";
+import { ECOPROOF_CONTRACT_ADDRESS, IS_CONTRACT_CONFIGURED } from "@/config/contract";
+import { contractService } from "@/services/contractService";
 
 interface Subscription {
   plan: string;
@@ -13,6 +17,12 @@ interface Subscription {
   subscribedAt: string;
   expiresAt: string;
 }
+
+const planPrices: Record<string, string> = {
+  "Starter": "0.000001",
+  "Business": "0.000005",
+  "Enterprise": "0.000015",
+};
 
 const plans = [
   {
@@ -37,7 +47,8 @@ const plans = [
 
 const sampleData = {
   status: "ok",
-  region: "Belgrade",
+  lat: 42.70,
+  lon: 18.42,
   timestamp: "2026-03-31T14:22:00Z",
   readings: {
     pm25: 12.4,
@@ -57,26 +68,48 @@ const generateApiKey = () => {
 };
 
 const ApiAccess = () => {
-  const { isConnected } = useAccount();
+  const { isConnected, address } = useAccount();
   const [subscription, setSubscription] = useState<Subscription | null>(null);
   const [copiedKey, setCopiedKey] = useState(false);
-  const [isSubscribing, setIsSubscribing] = useState(false);
+  const [pendingPlan, setPendingPlan] = useState<{ name: string; valueEth: string } | null>(null);
+  
+  // Send ETH transaction with wagmi
+  const { sendTransactionAsync, data: ethHash, isPending: isSubscribePending } = useSendTransaction();
+  const { isLoading: isSubscribeConfirming, isSuccess: isSubscribeConfirmed } = useWaitForTransactionReceipt({ hash: ethHash });
 
-  const handleSubscribe = async (planName: string) => {
-    if (!isConnected) return;
-    setIsSubscribing(true);
-    // Simulate on-chain subscription tx
-    await new Promise(r => setTimeout(r, 1500));
-    const now = new Date();
-    const expires = new Date(now);
-    expires.setMonth(expires.getMonth() + 1);
-    setSubscription({
-      plan: planName,
-      apiKey: generateApiKey(),
-      subscribedAt: now.toISOString().split("T")[0],
-      expiresAt: expires.toISOString().split("T")[0],
-    });
-    setIsSubscribing(false);
+  const handleSubscribe = async (planName: string, valueEth: string) => {
+    if (!isConnected || !address || !IS_CONTRACT_CONFIGURED) return;
+    try {
+      setPendingPlan({ name: planName, valueEth });
+      
+      // Send ETH directly to contract address
+      await sendTransactionAsync({
+        to: ECOPROOF_CONTRACT_ADDRESS,
+        value: parseEther(valueEth),
+      });
+      
+      toast.message(`Subscription transaction submitted (${valueEth} ETH).`);
+      
+      const now = new Date();
+      const expires = new Date(now);
+      expires.setMonth(expires.getMonth() + 1);
+
+      setSubscription({
+        plan: planName,
+        apiKey: generateApiKey(),
+        subscribedAt: now.toISOString().split("T")[0],
+        expiresAt: expires.toISOString().split("T")[0],
+      });
+
+      toast.success(`Plan ${planName} activated on-chain.`);
+      
+      setTimeout(() => {
+        setPendingPlan(null);
+      }, 2000);
+    } catch (error) {
+      setPendingPlan(null);
+      toast.error(contractService.parseError(error));
+    }
   };
 
   const handleCopyKey = () => {
@@ -86,17 +119,9 @@ const ApiAccess = () => {
     setTimeout(() => setCopiedKey(false), 2000);
   };
 
-  const handleChangePlan = (newPlan: string) => {
+  const handleChangePlan = async (newPlan: string, valueEth: string) => {
     if (!subscription) return;
-    const now = new Date();
-    const expires = new Date(now);
-    expires.setMonth(expires.getMonth() + 1);
-    setSubscription({
-      ...subscription,
-      plan: newPlan,
-      subscribedAt: now.toISOString().split("T")[0],
-      expiresAt: expires.toISOString().split("T")[0],
-    });
+    await handleSubscribe(newPlan, valueEth);
   };
 
   return (
@@ -252,10 +277,15 @@ const ApiAccess = () => {
                           <Button
                             variant="outline"
                             className="w-full"
-                            onClick={() => handleChangePlan(plan.name)}
+                            onClick={() => handleChangePlan(plan.name, planPrices[plan.name])}
+                            disabled={isSubscribePending || isSubscribeConfirming}
                           >
                             <ArrowUpRight className="w-4 h-4 mr-1" />
-                            Switch to {plan.name}
+                            {isSubscribePending
+                              ? "Confirm..."
+                              : isSubscribeConfirming
+                                ? "Confirming..."
+                                : `Switch to ${plan.name}`}
                           </Button>
                         ) : (
                           <Button
@@ -264,10 +294,14 @@ const ApiAccess = () => {
                               : "w-full"
                             }
                             variant={plan.popular ? "default" : "outline"}
-                            onClick={() => handleSubscribe(plan.name)}
-                            disabled={isSubscribing}
+                            onClick={() => handleSubscribe(plan.name, planPrices[plan.name])}
+                            disabled={isSubscribePending || isSubscribeConfirming}
                           >
-                            {isSubscribing ? "Processing..." : "Subscribe Now"}
+                            {isSubscribePending
+                              ? "Confirm..."
+                              : isSubscribeConfirming
+                                ? "Confirming..."
+                                : "Subscribe Now"}
                           </Button>
                         )
                       ) : (

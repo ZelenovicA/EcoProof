@@ -1,10 +1,11 @@
 import { Link, useLocation } from "react-router-dom";
-import { Leaf, Menu, X, Moon, Sun, Wallet } from "lucide-react";
+import { Leaf, Menu, X, Moon, Sun, Wallet, ExternalLink } from "lucide-react";
 import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useAccount, useConnect, useDisconnect } from "wagmi";
 import { ConnectButton } from "@rainbow-me/rainbowkit";
 import { Button } from "@/components/ui/button";
+import { BLOCK_EXPLORER_URL } from "@/config/contract";
 
 const navLinks = [
   { to: "/", label: "Home" },
@@ -69,6 +70,16 @@ const Navbar = () => {
         </div>
 
         <div className="flex items-center gap-2">
+          <a
+            href={BLOCK_EXPLORER_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+            aria-label="View contract on BaseScan"
+            title="View smart contract"
+          >
+            <ExternalLink className="w-4 h-4" />
+          </a>
           <button
             onClick={toggleDarkMode}
             className="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
