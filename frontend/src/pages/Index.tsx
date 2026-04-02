@@ -1,7 +1,7 @@
 import { motion } from "framer-motion";
 import { Leaf, Shield, Wifi, Coins, ArrowRight } from "lucide-react";
 import { Link } from "react-router-dom";
-import heroLeaf from "@/assets/hero-leaf.png";
+import imgLeaf from "@/assets/ecoBlockchainLeaf1.png";
 import PollutionMap from "@/components/PollutionMap";
 
 const features = [
@@ -71,9 +71,9 @@ const Index = () => {
             <div className="relative">
               <div className="absolute inset-0 bg-eco-green/10 rounded-full blur-3xl scale-150" />
               <img
-                src={heroLeaf}
+                src={imgLeaf}
                 alt="EcoProof leaf symbol"
-                className="relative w-64 md:w-80 h-auto drop-shadow-2xl"
+                className="relative w-72 md:w-[26rem] lg:w-[30rem] max-w-none h-auto drop-shadow-2xl"
                 width={800}
                 height={800}
               />

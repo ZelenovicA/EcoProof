@@ -38,6 +38,8 @@ class Sensor(Base):
 
     user = relationship("User", back_populates="sensors")
     readings = relationship("SensorData", back_populates="sensor")
+    hourly_validations = relationship("HourlyValidation", back_populates="sensor")
+    weekly_scores = relationship("WeeklySensorScore", back_populates="sensor")
 
 class SensorData(Base):
     __tablename__ = "sensor_data"
@@ -67,3 +69,31 @@ class HourlyValidation(Base):
     
     total_readings = Column(Integer, nullable=False, default=0)
     valid_readings = Column(Integer, nullable=False, default=0)
+
+    sensor = relationship("Sensor", back_populates="hourly_validations")
+
+class WeeklySensorScore(Base):
+    __tablename__ = "weekly_sensor_scores"
+
+    id = Column(Integer, primary_key=True, index=True)
+    sensor_id = Column(Integer, ForeignKey("sensors.id"), index=True, nullable=False)
+    week_start = Column(DateTime, index=True, nullable=False)
+    week_end = Column(DateTime, index=True, nullable=False)
+    cluster_id = Column(Integer, index=True, nullable=False, default=-1)
+
+    total_readings = Column(Integer, nullable=False, default=0)
+    comparable_readings = Column(Integer, nullable=False, default=0)
+    trusted_readings = Column(Integer, nullable=False, default=0)
+    cluster_size = Column(Integer, nullable=False, default=1)
+
+    trust_score = Column(Float, nullable=False, default=0.0)
+    peer_agreement_score = Column(Float, nullable=False, default=0.0)
+    temporal_score = Column(Float, nullable=False, default=0.0)
+    coverage_score = Column(Float, nullable=False, default=0.0)
+    anomaly_ratio = Column(Float, nullable=False, default=0.0)
+
+    avg_pm25 = Column(Float, nullable=False, default=0.0)
+    avg_pm10 = Column(Float, nullable=True)
+    calculated_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
+
+    sensor = relationship("Sensor", back_populates="weekly_scores")
