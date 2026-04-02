@@ -15,11 +15,9 @@ const rpcUrl = "";
 export const publicClient = createPublicClient({
   chain: sepolia,
   transport: http(rpcUrl || undefined),
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-}) as any;
+});
 
 export const walletClient = createWalletClient({
   chain: sepolia,
   transport: http(rpcUrl || undefined),
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-}) as any;
+});

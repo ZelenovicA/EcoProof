@@ -127,7 +127,7 @@ export const contractService = {
 		if (error?.shortMessage) return error.shortMessage;
 		if (error?.details) return error.details;
 		if (error?.message) return error.message;
-		return "Transaction failed. Please check the console for details.";
+		return "Transaction failed";
 	},
 
 	// ADDRESS FORMATTER

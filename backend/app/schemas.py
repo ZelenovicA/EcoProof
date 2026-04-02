@@ -3,17 +3,17 @@ from typing import Optional
 from datetime import datetime
 from enum import Enum
 
-class RejectionReason(str, Enum):
-    NONE = "NONE"
-    ZERO_VARIANCE = "ZERO_VARIANCE"
-    OUTLIER = "OUTLIER"
-    INSUFFICIENT_DATA = "INSUFFICIENT_DATA"
+class UserLogin(BaseModel):
+    wallet_address: str
+    signature: str
 
 class SensorCreate(BaseModel):
     device_id: str
+    isActive: Optional[bool] = True
+    timestamp_registered: datetime = datetime.utcnow()
     lat: float
     lon: float
-    owner_address: Optional[str] = None
+    owner_address: str
 
 class SensorResponse(SensorCreate):
     id: int
@@ -48,3 +48,9 @@ class HourlyValidationResponse(HourlyValidationCreate):
 
     class Config:
         from_attributes = True
+
+class RejectionReason(str, Enum):
+    NONE = "NONE"
+    ZERO_VARIANCE = "ZERO_VARIANCE"
+    OUTLIER = "OUTLIER"
+    INSUFFICIENT_DATA = "INSUFFICIENT_DATA"
