@@ -14,7 +14,8 @@ contract EcoRewardToken is ERC20, AccessControl {
         bool active;
         uint64 registeredAt;
         bytes32 sensorType;
-        string metadataURI;
+        int256 latitude;
+        int256 longitude; 
     }
 
     mapping(bytes32 => Device) public devices;
@@ -40,22 +41,23 @@ contract EcoRewardToken is ERC20, AccessControl {
         bytes32 indexed deviceId,
         address indexed owner,
         bytes32 indexed sensorType,
-        string metadataURI
+        int256 latitude,   // scaled (* 1e6)
+        int256 longitude  // scaled (* 1e6)
     );
     event DeviceStatusChanged(bytes32 indexed deviceId, bool active);
     event MetadataUpdated(
     bytes32 indexed deviceId,
     address indexed owner,
-    string metadataURI
+    int256 latitude, 
+    int256 longitude  
     );
+
+    event MerkleRootUpdated(bytes32 indexed newRoot,string ipfsCID, uint256 timestamp);
+    event RewardClaimed(address indexed user, uint256 amount);
     
     event TreasuryFunded(address indexed from, uint256 amount);
     event BuybackExecuted(address indexed user, uint256 tokenBurned, uint256 ethSpent);
     event BuybackPriceUpdated(uint256 newPricePerToken);
-
-    event MerkleRootUpdated(bytes32 indexed newRoot,string ipfsCID, uint256 timestamp);
-    event RewardClaimed(address indexed user, uint256 amount);
-
 
     // =======================
     //       CONSTRUCTOR
@@ -77,7 +79,8 @@ contract EcoRewardToken is ERC20, AccessControl {
         bytes32 deviceId,
         address deviceOwner,
         bytes32 sensorType,
-        string calldata metadataURI
+        int256 latitude,
+        int256 longitude
     ) external onlyRole(DEFAULT_ADMIN_ROLE) {
         require(deviceId != bytes32(0), "invalid device id");
         require(deviceOwner != address(0), "invalid owner");
@@ -88,10 +91,11 @@ contract EcoRewardToken is ERC20, AccessControl {
             active: true,
             registeredAt: uint64(block.timestamp),
             sensorType: sensorType,
-            metadataURI: metadataURI
+            latitude: latitude, 
+            longitude: longitude
         });
 
-        emit DeviceRegistered(deviceId, deviceOwner, sensorType, metadataURI);
+        emit DeviceRegistered(deviceId, deviceOwner, sensorType, latitude, longitude);
     }
 
     function setDeviceActive(bytes32 deviceId, bool active)
@@ -103,14 +107,16 @@ contract EcoRewardToken is ERC20, AccessControl {
         emit DeviceStatusChanged(deviceId, active);
     }
 
-    function updateMetadata(bytes32 deviceId, string calldata metadataURI)
+    function updateMetadata(bytes32 deviceId, int256 latitude, int256 longitude)
         external
     {
         require(devices[deviceId].owner != address(0), "unknown device");
-        require(devices[deviceId].owner == msg.sender, "Not the owner");
+        require(devices[deviceId].owner == msg.sender || hasRole(DEFAULT_ADMIN_ROLE, msg.sender), "Not the owner");
 
-        devices[deviceId].metadataURI = metadataURI;
-        emit MetadataUpdated(deviceId, msg.sender, metadataURI);
+        devices[deviceId].latitude = latitude;
+        devices[deviceId].latitude = longitude;
+
+        emit MetadataUpdated(deviceId, msg.sender, latitude, longitude);
     }
 
     // =======================
