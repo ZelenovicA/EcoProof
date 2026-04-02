@@ -1,0 +1,38 @@
+services:
+  db:
+    restart: unless-stopped
+    image: postgres:17
+    container_name: EcoProof_db
+    env_file:
+      - .env
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    
+
+  backend:
+    restart: unless-stopped
+    build: ./backend
+    container_name: EcoProof_backend
+    env_file:
+      - .env
+    depends_on:
+      - db
+    ports:
+      - "8000:8000"
+
+
+  frontend:
+    restart: unless-stopped
+    build: ./frontend
+    container_name: EcoProof_frontend
+    env_file:
+      - .env
+    depends_on:
+      - backend
+    ports:
+      - "3000:3000"
+
+volumes:
+  postgres_data:
