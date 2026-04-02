@@ -221,3 +221,24 @@ class ChainSyncCursor(Base):
         onupdate=datetime.datetime.utcnow,
         nullable=False,
     )
+
+class RegistrationStatus(str, enum.Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+class PendingRegistration(Base):
+    __tablename__ = "pending_registrations"
+    id = Column(Integer, primary_key=True, index=True)
+    activation_code = Column(String(6), nullable=False)
+    wallet_address = Column(String(42), index=True, nullable=False)
+    lat = Column(Float, nullable=False)
+    lon = Column(Float, nullable=False)
+    status = Column(SQLEnum(RegistrationStatus), nullable=False, default=RegistrationStatus.PENDING)
+    order_id = Column(Integer, ForeignKey("sensor_orders.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.datetime.utcnow,
+        onupdate=datetime.datetime.utcnow,
+        nullable=False,
+    )

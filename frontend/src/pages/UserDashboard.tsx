@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Wifi, MapPin, Coins, Edit, CheckCircle, AlertCircle,
-  Package, Truck, Sparkles, ArrowRight
+  Package, Truck, Sparkles, ArrowRight, Clock
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -10,7 +10,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useAccount, useReadContract, useSendTransaction, useWaitForTransactionReceipt, useWriteContract } from "wagmi";
 import { ConnectButton } from "@rainbow-me/rainbowkit";
-import { formatEther, parseEther, keccak256, encodePacked, stringToHex, zeroHash } from "viem";
+import { formatEther, parseEther, zeroHash } from "viem";
 import { baseSepolia } from "wagmi/chains";
 import { toast } from "sonner";
 import { ECOPROOF_CONTRACT_ADDRESS, ECOPROOF_ABI, IS_CONTRACT_CONFIGURED } from "@/config/contract";
@@ -21,10 +21,12 @@ import {
   orderApi,
   rewardApi,
   scoreApi,
+  registrationApi,
   type OrderDTO,
   type SensorDTO,
   type UserRewardDTO,
   type UserScoreDTO,
+  type PendingRegistrationDTO,
 } from "@/services/apiClient";
 
 
@@ -53,6 +55,7 @@ const UserDashboard = () => {
   // Data from API
   const [sensors, setSensors] = useState<SensorDTO[]>([]);
   const [orders, setOrders] = useState<OrderDTO[]>([]);
+  const [pendingRegs, setPendingRegs] = useState<PendingRegistrationDTO[]>([]);
   const [userScore, setUserScore] = useState<UserScoreDTO | null>(null);
   const [loadingSensors, setLoadingSensors] = useState(false);
 
@@ -60,12 +63,6 @@ const UserDashboard = () => {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [newLat, setNewLat] = useState("");
   const [newLng, setNewLng] = useState("");
-  const [pendingRegistration, setPendingRegistration] = useState<{
-    deviceId: `0x${string}`;
-    activationCode: string;
-    lat: string;
-    lng: string;
-  } | null>(null);
   const [pendingLocationUpdate, setPendingLocationUpdate] = useState<{
     id: number;
     lat: string;
@@ -111,7 +108,7 @@ const UserDashboard = () => {
     abi: ECOPROOF_ABI,
     functionName: "hasRole",
     args: address ? [zeroHash, address] : undefined,
-    query: { enabled: !!address && IS_CONTRACT_CONFIGURED },
+    query: { enabled: false }, // kept for potential future use
   });
 
   // Contract writes
@@ -119,8 +116,8 @@ const UserDashboard = () => {
   const { writeContractAsync: writeClaim, data: claimHash, isPending: isClaiming } = useWriteContract();
   const { isLoading: isClaimConfirming, isSuccess: isClaimConfirmed } = useWaitForTransactionReceipt({ hash: claimHash });
 
-  const { writeContractAsync: writeRegisterDevice, data: registerHash, isPending: isRegistering } = useWriteContract();
-  const { isLoading: isRegisterConfirming, isSuccess: isRegisterConfirmed } = useWaitForTransactionReceipt({ hash: registerHash });
+
+
 
   const { writeContractAsync: writeUpdateMetadata, data: updateMetadataHash, isPending: isUpdating } = useWriteContract();
   const { isLoading: isUpdateConfirming, isSuccess: isUpdateConfirmed } = useWaitForTransactionReceipt({ hash: updateMetadataHash });
@@ -134,12 +131,14 @@ const UserDashboard = () => {
     if (!address) return;
     setLoadingSensors(true);
     try {
-      const [sensorData, orderData] = await Promise.all([
+      const [sensorData, orderData, regData] = await Promise.all([
         sensorApi.list(address).catch(() => [] as SensorDTO[]),
         orderApi.list(address).catch(() => [] as OrderDTO[]),
+        registrationApi.list({ wallet_address: address, status: "pending" }).catch(() => [] as PendingRegistrationDTO[]),
       ]);
       setSensors(sensorData);
       setOrders(orderData);
+      setPendingRegs(regData);
       // Fetch score separately (may 404 for new users)
       scoreApi.get(address).then(setUserScore).catch(() => setUserScore(null));
     } finally {
@@ -175,6 +174,7 @@ const UserDashboard = () => {
       const txHash = await sendTransactionAsync({
         to: ECOPROOF_CONTRACT_ADDRESS,
         value: parseEther("0.00005"),
+        chain: baseSepolia,
       });
 
       const newOrder = await orderApi.create({
@@ -197,42 +197,29 @@ const UserDashboard = () => {
     }
   };
 
+  const [isSubmittingReg, setIsSubmittingReg] = useState(false);
+
   const handleRegister = async () => {
     if (!address) return;
     if (activationCode.length !== 6 || !regLat || !regLng) return;
-    if (!IS_CONTRACT_CONFIGURED) {
-      toast.error("Contract address is not configured.");
-      return;
-    }
-    if (!canRegisterDevice) {
-      toast.error("Registering a device requires admin role in the contract.");
-      return;
-    }
 
-    const scaledLat = toScaledCoordinate(regLat);
-    const scaledLng = toScaledCoordinate(regLng);
-    if (scaledLat === null || scaledLng === null) {
-      toast.error("Invalid coordinates.");
-      return;
-    }
-
-    const deviceId = keccak256(encodePacked(["string"], [activationCode])) as `0x${string}`;
-    const sensorType = stringToHex("AQ-V2", { size: 32 });
-
+    setIsSubmittingReg(true);
     try {
-      setPendingRegistration({ deviceId, activationCode, lat: regLat, lng: regLng });
-      await writeRegisterDevice({
-        address: ECOPROOF_CONTRACT_ADDRESS,
-        abi: ECOPROOF_ABI,
-        functionName: "registerDevice",
-        args: [deviceId, address, sensorType, scaledLat, scaledLng],
-        account: address,
-        chain: baseSepolia,
+      const reg = await registrationApi.create({
+        activation_code: activationCode,
+        wallet_address: address,
+        lat: Number(regLat),
+        lon: Number(regLng),
       });
-      toast.message("Register transaction submitted.");
+      setPendingRegs((prev) => [reg, ...prev]);
+      setActivationCode("");
+      setRegLat("");
+      setRegLng("");
+      toast.success("Registration submitted! Waiting for admin approval.");
     } catch (error) {
-      setPendingRegistration(null);
       toast.error(toErrorMessage(error));
+    } finally {
+      setIsSubmittingReg(false);
     }
   };
 
@@ -314,48 +301,6 @@ const UserDashboard = () => {
       setIsLoadingProof(false);
     }
   };
-
-  // After successful on-chain registration, save to backend
-  useEffect(() => {
-    if (!isRegisterConfirmed || !pendingRegistration || !address) return;
-
-    const syncRegistration = async () => {
-      const deviceId = pendingRegistration.deviceId.toLowerCase();
-      const lat = Number(pendingRegistration.lat);
-      const lon = Number(pendingRegistration.lng);
-
-      try {
-        await syncChainState();
-        const syncedSensors = await sensorApi.list(address).catch(() => [] as SensorDTO[]);
-
-        if (syncedSensors.some((sensor) => sensorMatchesDeviceId(sensor, deviceId))) {
-          await fetchData();
-          toast.success("Sensor registered on-chain and synced to backend.");
-        } else {
-          await sensorApi.register({
-            device_id: deviceId,
-            activation_code: pendingRegistration.activationCode,
-            lat,
-            lon,
-            owner_address: address,
-            sensor_type: "AQ-V2",
-          });
-          await fetchData();
-          toast.success("Sensor registered on-chain and saved to backend.");
-        }
-      } catch {
-        toast.warning("Registered on-chain but backend sync failed.");
-      }
-    };
-
-    syncRegistration();
-
-    setActivationCode("");
-    setRegLat("");
-    setRegLng("");
-    setAdditionalOrderStatus("none");
-    setPendingRegistration(null);
-  }, [isRegisterConfirmed, pendingRegistration, address, fetchData, syncChainState]);
 
   // After successful location update, save to backend
   useEffect(() => {
@@ -555,7 +500,25 @@ const UserDashboard = () => {
                       </div>
                     )}
 
-                    {orderStatus === "arrived" && (
+                    {orderStatus === "arrived" && pendingRegs.length > 0 ? (
+                      <motion.div
+                        initial={{ opacity: 0, y: 10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ delay: 0.2 }}
+                        className="max-w-lg mx-auto space-y-4 pt-4"
+                      >
+                        <div className="w-14 h-14 rounded-2xl bg-amber-500/10 flex items-center justify-center mx-auto">
+                          <Clock className="w-6 h-6 text-amber-500" />
+                        </div>
+                        <h3 className="text-xl font-serif text-foreground">Waiting for Admin Approval</h3>
+                        <p className="text-muted-foreground text-sm">
+                          Your registration request has been submitted. An admin will review and register your sensor on-chain shortly.
+                        </p>
+                        <Badge variant="outline" className="text-amber-500 border-amber-500/30">
+                          Code: {pendingRegs[0].activation_code} · Pending
+                        </Badge>
+                      </motion.div>
+                    ) : orderStatus === "arrived" && (
                       <motion.div
                         initial={{ opacity: 0, y: 10 }}
                         animate={{ opacity: 1, y: 0 }}
@@ -572,16 +535,11 @@ const UserDashboard = () => {
                         </div>
                         <Button
                           onClick={handleRegister}
-                          disabled={activationCode.length !== 6 || !regLat || !regLng || isRegistering || isRegisterConfirming}
+                          disabled={activationCode.length !== 6 || !regLat || !regLng || isSubmittingReg}
                           className="w-full eco-gradient text-primary-foreground hover:opacity-90 border-0"
                         >
-                          {isRegistering ? "Confirm..." : isRegisterConfirming ? "Confirming..." : "Register Sensor"}
+                          {isSubmittingReg ? "Submitting..." : "Register Sensor"}
                         </Button>
-                        {!canRegisterDevice && (
-                          <p className="text-xs text-muted-foreground">
-                            This on-chain registration step currently requires a wallet with the contract admin role.
-                          </p>
-                        )}
                       </motion.div>
                     )}
                   </motion.div>
@@ -903,16 +861,11 @@ const UserDashboard = () => {
                     </div>
                     <Button
                       onClick={handleRegister}
-                      disabled={activationCode.length !== 6 || !regLat || !regLng || isRegistering || isRegisterConfirming}
+                      disabled={activationCode.length !== 6 || !regLat || !regLng || isSubmittingReg}
                       className="w-full eco-gradient text-primary-foreground hover:opacity-90 border-0"
                     >
-                      {isRegistering ? "Confirm..." : isRegisterConfirming ? "Confirming..." : "Register Sensor"}
+                      {isSubmittingReg ? "Submitting..." : "Register Sensor"}
                     </Button>
-                    {!canRegisterDevice && (
-                      <p className="text-xs text-muted-foreground">
-                        This on-chain registration step currently requires a wallet with the contract admin role.
-                      </p>
-                    )}
                   </CardContent>
                 </Card>
               </motion.div>

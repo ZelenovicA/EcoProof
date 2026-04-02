@@ -280,3 +280,29 @@ export const validationApi = {
 export const weeklyRewardApi = {
   get: (sensorId: number) => request<any>(`/api/sensors/${sensorId}/weekly-reward`),
 };
+
+export interface PendingRegistrationDTO {
+  id: number;
+  activation_code: string;
+  wallet_address: string;
+  lat: number;
+  lon: number;
+  status: "pending" | "approved" | "rejected";
+  order_id: number | null;
+  created_at: string;
+  updated_at: string;
+}
+export const registrationApi = {
+  create: (data: { activation_code: string; wallet_address: string; lat: number; lon: number }) =>
+    request<PendingRegistrationDTO>("/registrations/", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  list: (params?: { status?: string; wallet_address?: string }) =>
+    request<PendingRegistrationDTO[]>(withQuery("/registrations/", params)),
+  updateStatus: (id: number, status: string) =>
+    request<PendingRegistrationDTO>(`/registrations/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status }),
+    }),
+};

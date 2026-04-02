@@ -1,18 +1,18 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
-import { AlertTriangle, Coins, Lock, Power, Shield, Upload } from "lucide-react";
+import { AlertTriangle, CheckCircle, Coins, Lock, MapPin, Power, Shield, Upload, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useAccount, useReadContract, useWriteContract, useWaitForTransactionReceipt } from "wagmi";
 import { ConnectButton } from "@rainbow-me/rainbowkit";
-import { formatEther, hexToString, zeroAddress, zeroHash, parseEther } from "viem";
+import { formatEther, hexToString, keccak256, encodePacked, stringToHex, zeroAddress, zeroHash, parseEther } from "viem";
 import { baseSepolia } from "wagmi/chains";
 import { toast } from "sonner";
 import { ECOPROOF_CONTRACT_ADDRESS, ECOPROOF_ABI, IS_CONTRACT_CONFIGURED } from "@/config/contract";
 import { contractService } from "@/services/contractService";
-import { chainApi, rewardApi, type MerkleTreeDTO } from "@/services/apiClient";
+import { chainApi, rewardApi, registrationApi, type MerkleTreeDTO, type PendingRegistrationDTO } from "@/services/apiClient";
 
 const isBytes32 = (value: string) => /^0x[a-fA-F0-9]{64}$/.test(value);
 
@@ -38,7 +38,8 @@ const Admin = () => {
   const [deviceIdInput, setDeviceIdInput] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
   const [generatedEpoch, setGeneratedEpoch] = useState<MerkleTreeDTO | null>(null);
-
+  const [pendingRegs, setPendingRegs] = useState<PendingRegistrationDTO[]>([]);
+  const [loadingRegs, setLoadingRegs] = useState(false);
   const normalizedDeviceId = useMemo(() => {
     const trimmed = deviceIdInput.trim();
     return isBytes32(trimmed) ? (trimmed as `0x${string}`) : undefined;
@@ -85,6 +86,9 @@ const Admin = () => {
   const { writeContractAsync: setDeviceActiveAsync, data: deviceHash, isPending: isDevicePending } = useWriteContract();
   const { isLoading: isDeviceConfirming, isSuccess: isDeviceConfirmed } = useWaitForTransactionReceipt({ hash: deviceHash });
 
+  const { writeContractAsync: writeRegisterDevice, isPending: isRegPending } = useWriteContract();
+  const [approvingRegId, setApprovingRegId] = useState<number | null>(null);
+
   const currentBuybackPrice = currentBuybackPriceRaw ? formatEther(currentBuybackPriceRaw as bigint) : "0";
   const deviceExists = selectedDevice && selectedDevice[0] && selectedDevice[0] !== zeroAddress;
   const selectedOwner = (selectedDevice as any)?.[0];
@@ -94,6 +98,18 @@ const Admin = () => {
   const selectedLongitude = (selectedDevice as any)?.[5];
   const isAdmin = !!hasAdminRole;
   const isDeviceActionLoading = isDevicePending || isDeviceConfirming;
+
+  const fetchPendingRegs = useCallback(async () => {
+    setLoadingRegs(true);
+    try {
+      const regs = await registrationApi.list({ status: "pending" });
+      setPendingRegs(regs);
+    } catch {
+      setPendingRegs([]);
+    } finally {
+      setLoadingRegs(false);
+    }
+  }, []);
 
   useEffect(() => {
     if (!isMerkleConfirmed || !generatedEpoch || !ipfsCID || !merkleHash) return;
@@ -108,6 +124,51 @@ const Admin = () => {
     if (!isDeviceConfirmed) return;
     chainApi.sync().catch(() => undefined);
   }, [isDeviceConfirmed]);
+
+  // Fetch pending registrations when admin is confirmed
+  useEffect(() => {
+    if (isAdmin) fetchPendingRegs();
+  }, [isAdmin, fetchPendingRegs]);
+
+  const handleApproveRegistration = async (reg: PendingRegistrationDTO) => {
+    if (!address || !IS_CONTRACT_CONFIGURED) return;
+    setApprovingRegId(reg.id);
+
+    const deviceId = keccak256(encodePacked(["string"], [reg.activation_code])) as `0x${string}`;
+    const sensorType = stringToHex("AQ-V2", { size: 32 });
+    const scaledLat = BigInt(Math.round(reg.lat * 1_000_000));
+    const scaledLng = BigInt(Math.round(reg.lon * 1_000_000));
+
+    try {
+      await writeRegisterDevice({
+        address: ECOPROOF_CONTRACT_ADDRESS,
+        abi: ECOPROOF_ABI,
+        functionName: "registerDevice",
+        args: [deviceId, reg.wallet_address as `0x${string}`, sensorType, scaledLat, scaledLng],
+        account: address,
+        chain: baseSepolia,
+      });
+
+      await registrationApi.updateStatus(reg.id, "approved");
+      await chainApi.sync().catch(() => undefined);
+      setPendingRegs((prev) => prev.filter((r) => r.id !== reg.id));
+      toast.success(`Sensor registered on-chain for ${reg.wallet_address.slice(0, 6)}...${reg.wallet_address.slice(-4)}`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to register device");
+    } finally {
+      setApprovingRegId(null);
+    }
+  };
+
+  const handleRejectRegistration = async (reg: PendingRegistrationDTO) => {
+    try {
+      await registrationApi.updateStatus(reg.id, "rejected");
+      setPendingRegs((prev) => prev.filter((r) => r.id !== reg.id));
+      toast.success("Registration rejected.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to reject");
+    }
+  };
 
   // ── Not connected ──
   if (!isConnected) {
@@ -377,9 +438,67 @@ const Admin = () => {
             </CardContent>
           </Card>
         </div>
+
+        {/* Pending Registrations */}
+        <div className="space-y-4">
+          <h2 className="text-2xl font-serif text-foreground flex items-center gap-2">
+            <Users className="w-5 h-5 text-primary" /> Pending Sensor Registrations
+          </h2>
+
+          {loadingRegs && <p className="text-muted-foreground text-sm">Loading...</p>}
+
+          {!loadingRegs && pendingRegs.length === 0 && (
+            <Card className="bg-card border-border">
+              <CardContent className="py-8 text-center">
+                <p className="text-muted-foreground">No pending registration requests.</p>
+              </CardContent>
+            </Card>
+          )}
+
+          {pendingRegs.map((reg) => (
+            <Card key={reg.id} className="bg-card border-border">
+              <CardContent className="pt-6">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2">
+                      <Badge variant="outline" className="text-amber-500 border-amber-500/30">Pending</Badge>
+                      <code className="text-sm font-mono text-foreground">{reg.wallet_address.slice(0, 6)}...{reg.wallet_address.slice(-4)}</code>
+                    </div>
+                    <p className="text-sm text-muted-foreground">
+                      Code: <strong>{reg.activation_code}</strong>
+                    </p>
+                    <p className="text-sm text-muted-foreground flex items-center gap-1">
+                      <MapPin className="w-3.5 h-3.5" /> {reg.lat.toFixed(6)}, {reg.lon.toFixed(6)}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      Submitted: {new Date(reg.created_at).toLocaleString()}
+                    </p>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      onClick={() => handleApproveRegistration(reg)}
+                      disabled={approvingRegId === reg.id || isRegPending}
+                      className="eco-gradient text-primary-foreground hover:opacity-90 border-0"
+                    >
+                      {approvingRegId === reg.id ? "Registering..." : <><CheckCircle className="w-3.5 h-3.5 mr-1" /> Approve & Register</>}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      onClick={() => handleRejectRegistration(reg)}
+                      disabled={approvingRegId === reg.id}
+                    >
+                      Reject
+                    </Button>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
       </div>
     </div>
   );
 };
 
 export default Admin;
+

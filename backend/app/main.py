@@ -864,3 +864,66 @@ def get_weekly_reward(
             "anomaly_ratio": round(score.anomaly_ratio, 4),
         },
     }
+# ── Pending Registrations ──
+@app.post("/registrations/", response_model=schemas.PendingRegistrationResponse)
+def create_registration(reg: schemas.PendingRegistrationCreate, db: Session = Depends(get_db)):
+    wallet_address = _normalize_wallet_address(reg.wallet_address) or reg.wallet_address
+    code = reg.activation_code.strip()
+    # Validate: code must exist in an order belonging to this wallet
+    order = (
+        db.query(models.SensorOrder)
+        .filter(
+            models.SensorOrder.activation_code == code,
+            func.lower(models.SensorOrder.buyer_address) == wallet_address,
+        )
+        .first()
+    )
+    if order is None:
+        raise HTTPException(status_code=400, detail="Invalid activation code or it does not belong to your wallet.")
+    # Check if already pending
+    existing = (
+        db.query(models.PendingRegistration)
+        .filter(
+            models.PendingRegistration.activation_code == code,
+            func.lower(models.PendingRegistration.wallet_address) == wallet_address,
+            models.PendingRegistration.status == models.RegistrationStatus.PENDING,
+        )
+        .first()
+    )
+    if existing is not None:
+        return existing
+    _ensure_user_record(db, wallet_address)
+    pending = models.PendingRegistration(
+        activation_code=code,
+        wallet_address=wallet_address,
+        lat=reg.lat,
+        lon=reg.lon,
+        order_id=order.id,
+    )
+    db.add(pending)
+    db.commit()
+    db.refresh(pending)
+    return pending
+@app.get("/registrations/", response_model=list[schemas.PendingRegistrationResponse])
+def list_registrations(
+    status: str | None = None,
+    wallet_address: str | None = None,
+    db: Session = Depends(get_db),
+):
+    query = db.query(models.PendingRegistration)
+    if status:
+        query = query.filter(models.PendingRegistration.status == status)
+    if wallet_address:
+        query = query.filter(
+            func.lower(models.PendingRegistration.wallet_address) == _normalize_wallet_address(wallet_address)
+        )
+    return query.order_by(models.PendingRegistration.created_at.desc()).all()
+@app.patch("/registrations/{reg_id}", response_model=schemas.PendingRegistrationResponse)
+def update_registration(reg_id: int, update: schemas.PendingRegistrationUpdate, db: Session = Depends(get_db)):
+    reg = db.query(models.PendingRegistration).filter(models.PendingRegistration.id == reg_id).first()
+    if reg is None:
+        raise HTTPException(status_code=404, detail="Registration request not found.")
+    reg.status = models.RegistrationStatus(update.status.value)
+    db.commit()
+    db.refresh(reg)
+    return reg

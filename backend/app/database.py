@@ -73,6 +73,11 @@ def ensure_compat_schema() -> None:
             statements.append("ALTER TABLE sensor_orders ADD COLUMN updated_at TIMESTAMP DEFAULT NOW()")
         if "created_at" in order_columns:
             statements.append("UPDATE sensor_orders SET updated_at = created_at WHERE updated_at IS NULL")
+        # Backfill missing activation codes with random 6-digit codes
+        statements.append(
+            "UPDATE sensor_orders SET activation_code = LPAD(FLOOR(RANDOM() * 1000000)::TEXT, 6, '0') "
+            "WHERE activation_code IS NULL OR activation_code = ''"
+        )
 
     if inspector.has_table("api_subscriptions"):
         api_subscription_columns = _column_map(inspector, "api_subscriptions")

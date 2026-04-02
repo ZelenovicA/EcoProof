@@ -286,3 +286,27 @@ class MerkleTreeResponse(BaseModel):
     total_rewards: str
     num_users: int
     ipfs_cid: Optional[str] = None
+
+class RegistrationStatusEnum(str, Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+class PendingRegistrationCreate(BaseModel):
+    activation_code: str
+    wallet_address: str
+    lat: float
+    lon: float
+class PendingRegistrationResponse(BaseModel):
+    id: int
+    activation_code: str
+    wallet_address: str
+    lat: float
+    lon: float
+    status: RegistrationStatusEnum
+    order_id: Optional[int] = None
+    created_at: datetime
+    updated_at: datetime
+    class Config:
+        from_attributes = True
+class PendingRegistrationUpdate(BaseModel):
+    status: RegistrationStatusEnum
