@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Wifi, MapPin, Coins, Edit, CheckCircle, AlertCircle,
@@ -8,25 +8,27 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { useAccount, useReadContract, useWriteContract, useWaitForTransactionReceipt } from "wagmi";
+import { useAccount, useReadContract, useSendTransaction, useWaitForTransactionReceipt, useWriteContract } from "wagmi";
 import { ConnectButton } from "@rainbow-me/rainbowkit";
 import { formatEther, parseEther, keccak256, encodePacked, stringToHex, zeroHash } from "viem";
+import { baseSepolia } from "wagmi/chains";
 import { toast } from "sonner";
 import { ECOPROOF_CONTRACT_ADDRESS, ECOPROOF_ABI, IS_CONTRACT_CONFIGURED } from "@/config/contract";
 import LocationPicker from "@/components/LocationPicker";
+import {
+  chainApi,
+  sensorApi,
+  orderApi,
+  rewardApi,
+  scoreApi,
+  type OrderDTO,
+  type SensorDTO,
+  type UserRewardDTO,
+  type UserScoreDTO,
+} from "@/services/apiClient";
 
-interface LocalSensor {
-  id: string;
-  deviceId: string; // short display
-  deviceIdRaw: `0x${string}`; // full bytes32 for contract writes
-  lat: string;
-  lng: string;
-  active: boolean;
-  registeredAt: string;
-  sensorType: string;
-}
 
-type OrderStatus = "none" | "shipping" | "arrived";
+type OrderStatus = "none" | "pending" | "shipping" | "arrived";
 type AdditionalOrderStatus = "none" | "ordering" | "shipping" | "arrived";
 
 const toScaledCoordinate = (value: string) => {
@@ -40,19 +42,32 @@ const shortDeviceId = (deviceId: string) => `${deviceId.slice(0, 10)}...${device
 const toErrorMessage = (error: unknown) =>
   error instanceof Error && error.message ? error.message : "Transaction failed";
 
+const sensorMatchesDeviceId = (sensor: SensorDTO, deviceId: string) =>
+  sensor.device_id.toLowerCase() === deviceId || sensor.device_id_hash?.toLowerCase() === deviceId;
+
+const coordinatesMatch = (sensor: Pick<SensorDTO, "lat" | "lon">, lat: number, lon: number) =>
+  Math.abs(sensor.lat - lat) < 0.000001 && Math.abs(sensor.lon - lon) < 0.000001;
+
 const UserDashboard = () => {
   const { address, isConnected } = useAccount();
-  const [sensors, setSensors] = useState<LocalSensor[]>([]);
-  const [editingId, setEditingId] = useState<string | null>(null);
+  // Data from API
+  const [sensors, setSensors] = useState<SensorDTO[]>([]);
+  const [orders, setOrders] = useState<OrderDTO[]>([]);
+  const [userScore, setUserScore] = useState<UserScoreDTO | null>(null);
+  const [loadingSensors, setLoadingSensors] = useState(false);
+
+  // UI state
+  const [editingId, setEditingId] = useState<number | null>(null);
   const [newLat, setNewLat] = useState("");
   const [newLng, setNewLng] = useState("");
   const [pendingRegistration, setPendingRegistration] = useState<{
     deviceId: `0x${string}`;
+    activationCode: string;
     lat: string;
     lng: string;
   } | null>(null);
   const [pendingLocationUpdate, setPendingLocationUpdate] = useState<{
-    id: string;
+    id: number;
     lat: string;
     lng: string;
   } | null>(null);
@@ -63,7 +78,6 @@ const UserDashboard = () => {
   const [regLng, setRegLng] = useState("");
 
   // Purchase
-  const [orderStatus, setOrderStatus] = useState<OrderStatus>("none");
   const [shippingAddress, setShippingAddress] = useState("");
   const [shippingCity, setShippingCity] = useState("");
   const [shippingCountry, setShippingCountry] = useState("");
@@ -72,6 +86,8 @@ const UserDashboard = () => {
   // Claim
   const [showClaimModal, setShowClaimModal] = useState(false);
   const [isLoadingProof, setIsLoadingProof] = useState(false);
+  const [rewardData, setRewardData] = useState<UserRewardDTO | null>(null);
+  const [isSubmittingOrder, setIsSubmittingOrder] = useState(false);
 
   // Contract reads
   const { data: tokenBalance } = useReadContract({
@@ -99,40 +115,86 @@ const UserDashboard = () => {
   });
 
   // Contract writes
+  const { sendTransactionAsync, isPending: isPurchasePending } = useSendTransaction();
   const { writeContractAsync: writeClaim, data: claimHash, isPending: isClaiming } = useWriteContract();
   const { isLoading: isClaimConfirming, isSuccess: isClaimConfirmed } = useWaitForTransactionReceipt({ hash: claimHash });
 
-  const {
-    writeContractAsync: writeRegisterDevice,
-    data: registerHash,
-    isPending: isRegistering,
-  } = useWriteContract();
-  const {
-    isLoading: isRegisterConfirming,
-    isSuccess: isRegisterConfirmed,
-  } = useWaitForTransactionReceipt({ hash: registerHash });
+  const { writeContractAsync: writeRegisterDevice, data: registerHash, isPending: isRegistering } = useWriteContract();
+  const { isLoading: isRegisterConfirming, isSuccess: isRegisterConfirmed } = useWaitForTransactionReceipt({ hash: registerHash });
 
-  const {
-    writeContractAsync: writeUpdateMetadata,
-    data: updateMetadataHash,
-    isPending: isUpdating,
-  } = useWriteContract();
-  const {
-    isLoading: isUpdateConfirming,
-    isSuccess: isUpdateConfirmed,
-  } = useWaitForTransactionReceipt({ hash: updateMetadataHash });
+  const { writeContractAsync: writeUpdateMetadata, data: updateMetadataHash, isPending: isUpdating } = useWriteContract();
+  const { isLoading: isUpdateConfirming, isSuccess: isUpdateConfirmed } = useWaitForTransactionReceipt({ hash: updateMetadataHash });
 
   const formattedBalance = tokenBalance ? formatEther(tokenBalance as bigint) : "0.00";
   const formattedClaimed = totalClaimedData ? formatEther(totalClaimedData as bigint) : "0.00";
+  const isPurchaseBusy = isPurchasePending || isSubmittingOrder;
 
-  const handlePurchase = () => {
-    if (!shippingAddress || !shippingCity || !shippingCountry || !shippingZip) return;
-    // In production, this sends ETH to the contract
-    setOrderStatus("shipping");
-  };
+  // ── Fetch sensors & orders from API ──
+  const fetchData = useCallback(async () => {
+    if (!address) return;
+    setLoadingSensors(true);
+    try {
+      const [sensorData, orderData] = await Promise.all([
+        sensorApi.list(address).catch(() => [] as SensorDTO[]),
+        orderApi.list(address).catch(() => [] as OrderDTO[]),
+      ]);
+      setSensors(sensorData);
+      setOrders(orderData);
+      // Fetch score separately (may 404 for new users)
+      scoreApi.get(address).then(setUserScore).catch(() => setUserScore(null));
+    } finally {
+      setLoadingSensors(false);
+    }
+  }, [address]);
 
-  const handleConfirmArrived = () => {
-    setOrderStatus("arrived");
+  const syncChainState = useCallback(async () => {
+    try {
+      return await chainApi.sync();
+    } catch {
+      return null;
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
+
+  // Derive order status from API data
+  const latestOrder = orders.find(o => o.status !== "cancelled");
+  const orderStatus = !latestOrder ? "none" : latestOrder.status === "arrived" ? "arrived" : latestOrder.status === "shipping" ? "shipping" : "pending";
+
+  const handlePurchase = async () => {
+    if (!shippingAddress || !shippingCity || !shippingCountry || !shippingZip || !address) return false;
+    if (!IS_CONTRACT_CONFIGURED) {
+      toast.error("Contract address is not configured.");
+      return false;
+    }
+
+    setIsSubmittingOrder(true);
+    try {
+      const txHash = await sendTransactionAsync({
+        to: ECOPROOF_CONTRACT_ADDRESS,
+        value: parseEther("0.00005"),
+      });
+
+      const newOrder = await orderApi.create({
+        buyer_address: address,
+        shipping_street: shippingAddress,
+        shipping_city: shippingCity,
+        shipping_zip: shippingZip,
+        shipping_country: shippingCountry,
+        tx_hash: txHash,
+        amount_eth: "0.00005",
+      });
+      setOrders((prev) => [newOrder, ...prev.filter((order) => order.id !== newOrder.id)]);
+      toast.success("Payment sent and order saved.");
+      return true;
+    } catch (error) {
+      toast.error(toErrorMessage(error));
+      return false;
+    } finally {
+      setIsSubmittingOrder(false);
+    }
   };
 
   const handleRegister = async () => {
@@ -158,12 +220,14 @@ const UserDashboard = () => {
     const sensorType = stringToHex("AQ-V2", { size: 32 });
 
     try {
-      setPendingRegistration({ deviceId, lat: regLat, lng: regLng });
+      setPendingRegistration({ deviceId, activationCode, lat: regLat, lng: regLng });
       await writeRegisterDevice({
         address: ECOPROOF_CONTRACT_ADDRESS,
         abi: ECOPROOF_ABI,
         functionName: "registerDevice",
         args: [deviceId, address, sensorType, scaledLat, scaledLng],
+        account: address,
+        chain: baseSepolia,
       });
       toast.message("Register transaction submitted.");
     } catch (error) {
@@ -172,14 +236,14 @@ const UserDashboard = () => {
     }
   };
 
-  const handleUpdateLocation = async (id: string) => {
-    if (!IS_CONTRACT_CONFIGURED) {
+  const handleUpdateLocation = async (id: number) => {
+    if (!IS_CONTRACT_CONFIGURED || !address) {
       toast.error("Contract address is not configured.");
       return;
     }
 
     const target = sensors.find((sensor) => sensor.id === id);
-    if (!target) return;
+    if (!target || !target.device_id_hash) return;
 
     const scaledLat = toScaledCoordinate(newLat);
     const scaledLng = toScaledCoordinate(newLng);
@@ -194,11 +258,25 @@ const UserDashboard = () => {
         address: ECOPROOF_CONTRACT_ADDRESS,
         abi: ECOPROOF_ABI,
         functionName: "updateMetadata",
-        args: [target.deviceIdRaw, scaledLat, scaledLng],
+        args: [target.device_id_hash as `0x${string}`, scaledLat, scaledLng],
+        account: address,
+        chain: baseSepolia,
       });
       toast.message("Update location transaction submitted.");
     } catch (error) {
       setPendingLocationUpdate(null);
+      toast.error(toErrorMessage(error));
+    }
+  };
+
+  const handleConfirmArrived = async () => {
+    if (!latestOrder) return;
+
+    try {
+      const updatedOrder = await orderApi.updateStatus(latestOrder.id, { status: "arrived" });
+      setOrders((prev) => prev.map((order) => (order.id === updatedOrder.id ? updatedOrder : order)));
+      toast.success("Order marked as arrived.");
+    } catch (error) {
       toast.error(toErrorMessage(error));
     }
   };
@@ -212,21 +290,22 @@ const UserDashboard = () => {
 
     setIsLoadingProof(true);
     try {
-      // In production, this fetches from the rewards API/IPFS
-      // which returns the user's cumulative amount and merkle proof
-      // Simulated: auto-generate proof data for this user
-      await new Promise(r => setTimeout(r, 1500)); // simulate API call
-      const simulatedAmount = "250"; // fetched from rewards distribution
-      const simulatedProof: `0x${string}`[] = [
-        "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
-        "0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd",
-      ];
+      const reward = await rewardApi.getUserReward(address);
+      setRewardData(reward);
 
+      if (reward.already_claimed) {
+        toast.info("Rewards already claimed for this epoch.");
+        return;
+      }
+
+      const proofHashes = reward.proof.map(p => p as `0x${string}`);
       await writeClaim({
         address: ECOPROOF_CONTRACT_ADDRESS,
         abi: ECOPROOF_ABI,
         functionName: "claim",
-        args: [parseEther(simulatedAmount), simulatedProof],
+        args: [BigInt(reward.cumulative_amount), proofHashes],
+        account: address,
+        chain: baseSepolia,
       });
       toast.message("Claim transaction submitted.");
     } catch (error) {
@@ -236,49 +315,99 @@ const UserDashboard = () => {
     }
   };
 
+  // After successful on-chain registration, save to backend
   useEffect(() => {
-    if (!isRegisterConfirmed || !pendingRegistration) return;
+    if (!isRegisterConfirmed || !pendingRegistration || !address) return;
 
-    setSensors((prev) => [
-      ...prev,
-      {
-        id: String(prev.length + 1),
-        deviceId: shortDeviceId(pendingRegistration.deviceId),
-        deviceIdRaw: pendingRegistration.deviceId,
-        lat: pendingRegistration.lat,
-        lng: pendingRegistration.lng,
-        active: true,
-        registeredAt: new Date().toISOString().split("T")[0],
-        sensorType: "AQ-V2",
-      },
-    ]);
+    const syncRegistration = async () => {
+      const deviceId = pendingRegistration.deviceId.toLowerCase();
+      const lat = Number(pendingRegistration.lat);
+      const lon = Number(pendingRegistration.lng);
+
+      try {
+        await syncChainState();
+        const syncedSensors = await sensorApi.list(address).catch(() => [] as SensorDTO[]);
+
+        if (syncedSensors.some((sensor) => sensorMatchesDeviceId(sensor, deviceId))) {
+          await fetchData();
+          toast.success("Sensor registered on-chain and synced to backend.");
+        } else {
+          await sensorApi.register({
+            device_id: deviceId,
+            activation_code: pendingRegistration.activationCode,
+            lat,
+            lon,
+            owner_address: address,
+            sensor_type: "AQ-V2",
+          });
+          await fetchData();
+          toast.success("Sensor registered on-chain and saved to backend.");
+        }
+      } catch {
+        toast.warning("Registered on-chain but backend sync failed.");
+      }
+    };
+
+    syncRegistration();
 
     setActivationCode("");
     setRegLat("");
     setRegLng("");
-    setOrderStatus("none");
     setAdditionalOrderStatus("none");
     setPendingRegistration(null);
-    toast.success("Sensor registered on-chain.");
-  }, [isRegisterConfirmed, pendingRegistration]);
+  }, [isRegisterConfirmed, pendingRegistration, address, fetchData, syncChainState]);
 
+  // After successful location update, save to backend
   useEffect(() => {
     if (!isUpdateConfirmed || !pendingLocationUpdate) return;
 
-    setSensors((prev) =>
-      prev.map((sensor) =>
-        sensor.id === pendingLocationUpdate.id
-          ? { ...sensor, lat: pendingLocationUpdate.lat, lng: pendingLocationUpdate.lng }
-          : sensor,
-      ),
-    );
+    const syncLocationUpdate = async () => {
+      const lat = Number(pendingLocationUpdate.lat);
+      const lon = Number(pendingLocationUpdate.lng);
+
+      try {
+        await syncChainState();
+        const refreshedSensor = await sensorApi.get(pendingLocationUpdate.id).catch(() => null);
+
+        if (refreshedSensor && coordinatesMatch(refreshedSensor, lat, lon)) {
+          await fetchData();
+          toast.success("Device location updated and synced to backend.");
+        } else {
+          await sensorApi.update(pendingLocationUpdate.id, { lat, lon });
+          await fetchData();
+          toast.success("Device location updated.");
+        }
+      } catch {
+        toast.warning("Updated on-chain but backend sync failed.");
+      }
+    };
+
+    syncLocationUpdate();
 
     setEditingId(null);
     setNewLat("");
     setNewLng("");
     setPendingLocationUpdate(null);
-    toast.success("Device location updated on-chain.");
-  }, [isUpdateConfirmed, pendingLocationUpdate]);
+  }, [isUpdateConfirmed, pendingLocationUpdate, fetchData, syncChainState]);
+
+  useEffect(() => {
+    if (!isClaimConfirmed || !address) return;
+
+    const syncClaimState = async () => {
+      await syncChainState();
+
+      try {
+        const refreshedReward = await rewardApi.getUserReward(address);
+        setRewardData({ ...refreshedReward, already_claimed: true });
+      } catch {
+        setRewardData((prev) => (prev ? { ...prev, already_claimed: true } : prev));
+      }
+
+      await fetchData();
+    };
+
+    syncClaimState();
+  }, [isClaimConfirmed, address, fetchData, syncChainState]);
 
   if (!isConnected) {
     return (
@@ -304,6 +433,8 @@ const UserDashboard = () => {
   }
 
   const hasSensors = sensors.length > 0;
+  const showPurchaseForm = !hasSensors && orderStatus === "none";
+  const showDeliveryStatus = !hasSensors && orderStatus !== "none";
 
   return (
     <div className="min-h-screen pt-16">
@@ -315,8 +446,12 @@ const UserDashboard = () => {
           </p>
         </motion.div>
 
+        {loadingSensors && (
+          <div className="text-center text-muted-foreground py-8">Loading your data...</div>
+        )}
+
         {/* === No sensors: Buy a sensor pitch === */}
-        {!hasSensors && orderStatus === "none" && (
+        {!loadingSensors && showPurchaseForm && (
           <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
             <Card className="bg-card border-border overflow-hidden">
               <div className="grid md:grid-cols-2">
@@ -345,39 +480,19 @@ const UserDashboard = () => {
                 <div className="p-8 md:p-10 bg-muted/30 space-y-4 flex flex-col justify-center">
                   <h3 className="text-lg font-serif text-foreground">Shipping Address</h3>
                   <div className="space-y-3">
-                    <Input
-                      value={shippingAddress}
-                      onChange={(e) => setShippingAddress(e.target.value)}
-                      placeholder="Street address"
-                      className="bg-background"
-                    />
+                    <Input value={shippingAddress} onChange={(e) => setShippingAddress(e.target.value)} placeholder="Street address" className="bg-background" />
                     <div className="grid grid-cols-2 gap-3">
-                      <Input
-                        value={shippingCity}
-                        onChange={(e) => setShippingCity(e.target.value)}
-                        placeholder="City"
-                        className="bg-background"
-                      />
-                      <Input
-                        value={shippingZip}
-                        onChange={(e) => setShippingZip(e.target.value)}
-                        placeholder="ZIP / Postal code"
-                        className="bg-background"
-                      />
+                      <Input value={shippingCity} onChange={(e) => setShippingCity(e.target.value)} placeholder="City" className="bg-background" />
+                      <Input value={shippingZip} onChange={(e) => setShippingZip(e.target.value)} placeholder="ZIP / Postal code" className="bg-background" />
                     </div>
-                    <Input
-                      value={shippingCountry}
-                      onChange={(e) => setShippingCountry(e.target.value)}
-                      placeholder="Country"
-                      className="bg-background"
-                    />
+                    <Input value={shippingCountry} onChange={(e) => setShippingCountry(e.target.value)} placeholder="Country" className="bg-background" />
                   </div>
                   <Button
                     onClick={handlePurchase}
-                    disabled={!shippingAddress || !shippingCity || !shippingCountry || !shippingZip}
+                    disabled={!shippingAddress || !shippingCity || !shippingCountry || !shippingZip || isPurchaseBusy}
                     className="w-full eco-gradient text-primary-foreground hover:opacity-90 border-0 text-base py-6"
                   >
-                    Pay 0.05 ETH & Order <ArrowRight className="w-4 h-4 ml-1" />
+                    {isPurchaseBusy ? "Confirming order..." : <>Pay 0.05 ETH & Order <ArrowRight className="w-4 h-4 ml-1" /></>}
                   </Button>
                   <p className="text-xs text-muted-foreground text-center">
                     You'll receive a 6-digit activation code and set your sensor location when it arrives.
@@ -389,7 +504,7 @@ const UserDashboard = () => {
         )}
 
         {/* === Awaiting delivery === */}
-        {!hasSensors && orderStatus !== "none" && (
+        {!loadingSensors && showDeliveryStatus && (
           <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }}>
             <Card className="bg-card border-border">
               <CardContent className="py-12 text-center space-y-4">
@@ -411,16 +526,15 @@ const UserDashboard = () => {
                     className="space-y-4"
                   >
                     <h2 className="text-2xl font-serif text-foreground">
-                      {orderStatus === "shipping" ? "Your Sensor Is On Its Way!" : "Sensor Arrived!"}
+                      {orderStatus === "arrived" ? "Sensor Arrived!" : "Your Sensor Is On Its Way!"}
                     </h2>
                     <p className="text-muted-foreground max-w-md mx-auto">
-                      {orderStatus === "shipping"
-                        ? "We're preparing your AQ-V2 sensor for shipment. You'll receive a tracking number soon."
-                        : "Your sensor has arrived! Enter the 6-digit activation code from the packaging below to register it."
-                      }
+                      {orderStatus === "arrived"
+                        ? "Your sensor has arrived! Enter the 6-digit activation code from the packaging below to register it."
+                        : "We're preparing your AQ-V2 sensor for shipment. You'll receive a tracking number soon."}
                     </p>
 
-                    {orderStatus === "shipping" && (
+                    {(orderStatus === "pending" || orderStatus === "shipping") && (
                       <div className="space-y-4 pt-2">
                         <div className="flex items-center justify-center gap-3">
                           <div className="flex gap-1">
@@ -435,11 +549,7 @@ const UserDashboard = () => {
                           </div>
                           <span className="text-sm text-muted-foreground">Shipping in progress</span>
                         </div>
-                        <Button
-                          onClick={handleConfirmArrived}
-                          variant="outline"
-                          className="mx-auto"
-                        >
+                        <Button onClick={handleConfirmArrived} variant="outline" className="mx-auto">
                           <CheckCircle className="w-4 h-4 mr-2" /> I Received My Sensor
                         </Button>
                       </div>
@@ -467,6 +577,11 @@ const UserDashboard = () => {
                         >
                           {isRegistering ? "Confirm..." : isRegisterConfirming ? "Confirming..." : "Register Sensor"}
                         </Button>
+                        {!canRegisterDevice && (
+                          <p className="text-xs text-muted-foreground">
+                            This on-chain registration step currently requires a wallet with the contract admin role.
+                          </p>
+                        )}
                       </motion.div>
                     )}
                   </motion.div>
@@ -480,7 +595,7 @@ const UserDashboard = () => {
         {hasSensors && (
           <>
             {/* Stats */}
-            <div className="grid sm:grid-cols-3 gap-4">
+            <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
               <Card className="bg-card border-border">
                 <CardContent className="pt-6 flex items-center gap-4">
                   <div className="w-12 h-12 rounded-xl eco-gradient flex items-center justify-center flex-shrink-0">
@@ -505,7 +620,19 @@ const UserDashboard = () => {
                   </div>
                 </CardContent>
               </Card>
-              {/* Claimable — clickable card */}
+              <Card className="bg-card border-border">
+                <CardContent className="pt-6 flex items-center gap-4">
+                  <div className="w-12 h-12 rounded-xl bg-muted flex items-center justify-center flex-shrink-0">
+                    <MapPin className="w-5 h-5 text-foreground" />
+                  </div>
+                  <div>
+                    <p className="text-sm text-muted-foreground">Your Score</p>
+                    <p className="text-2xl font-serif text-foreground">
+                      {userScore ? userScore.score.toLocaleString(undefined, { maximumFractionDigits: 0 }) : "0"}
+                    </p>
+                  </div>
+                </CardContent>
+              </Card>
               <Card
                 className="bg-card border-border cursor-pointer group hover:border-primary/40 transition-colors"
                 onClick={() => setShowClaimModal(true)}
@@ -524,6 +651,8 @@ const UserDashboard = () => {
                 </CardContent>
               </Card>
             </div>
+
+
 
             {/* Claim rewards modal */}
             <AnimatePresence>
@@ -558,7 +687,9 @@ const UserDashboard = () => {
                         <div className="eco-card bg-muted/30 text-left space-y-2">
                           <div className="flex justify-between text-sm">
                             <span className="text-muted-foreground">Available to claim</span>
-                            <span className="font-medium text-foreground">250 ECR</span>
+                            <span className="font-medium text-foreground">
+                              {rewardData ? `${formatEther(BigInt(rewardData.cumulative_amount))} ECR` : "Fetch on claim"}
+                            </span>
                           </div>
                           <div className="flex justify-between text-sm">
                             <span className="text-muted-foreground">Already claimed</span>
@@ -566,7 +697,9 @@ const UserDashboard = () => {
                           </div>
                           <div className="flex justify-between text-sm">
                             <span className="text-muted-foreground">Proof status</span>
-                            <span className="text-primary font-medium flex items-center gap-1"><CheckCircle className="w-3 h-3" /> Verified</span>
+                            <span className="text-primary font-medium flex items-center gap-1">
+                              {rewardData ? <><CheckCircle className="w-3 h-3" /> Verified</> : "Pending"}
+                            </span>
                           </div>
                         </div>
                         <Button
@@ -605,7 +738,7 @@ const UserDashboard = () => {
               )}
             </AnimatePresence>
 
-            {/* Sensor list — shown first */}
+            {/* Sensor list */}
             <div className="space-y-4">
               <h2 className="text-2xl font-serif text-foreground">Your Sensors</h2>
               <div className="grid gap-4">
@@ -621,7 +754,9 @@ const UserDashboard = () => {
                         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                           <div className="space-y-1">
                             <div className="flex items-center gap-2">
-                              <code className="text-sm text-foreground font-mono">{sensor.deviceId}</code>
+                              <code className="text-sm text-foreground font-mono">
+                                {sensor.device_id_hash ? shortDeviceId(sensor.device_id_hash) : sensor.device_id}
+                              </code>
                               <Badge variant={sensor.active ? "default" : "secondary"} className={sensor.active ? "bg-primary text-primary-foreground" : ""}>
                                 {sensor.active ? <><CheckCircle className="w-3 h-3 mr-1" /> Active</> : <><AlertCircle className="w-3 h-3 mr-1" /> Inactive</>}
                               </Badge>
@@ -632,27 +767,22 @@ const UserDashboard = () => {
                                 <div className="flex items-center gap-2">
                                   <Input value={newLat} onChange={(e) => setNewLat(e.target.value)} placeholder="Lat" type="number" step="any" className="h-7 w-24 text-sm bg-background" />
                                   <Input value={newLng} onChange={(e) => setNewLng(e.target.value)} placeholder="Lng" type="number" step="any" className="h-7 w-24 text-sm bg-background" />
-                                  <Button
-                                    size="sm"
-                                    variant="outline"
-                                    onClick={() => handleUpdateLocation(sensor.id)}
-                                    disabled={isUpdating || isUpdateConfirming}
-                                  >
+                                  <Button size="sm" variant="outline" onClick={() => handleUpdateLocation(sensor.id)} disabled={isUpdating || isUpdateConfirming}>
                                     {isUpdating ? "Confirm..." : isUpdateConfirming ? "Confirming..." : "Save"}
                                   </Button>
                                   <Button size="sm" variant="ghost" onClick={() => setEditingId(null)}>Cancel</Button>
                                 </div>
                               ) : (
-                                <span>{sensor.lat}, {sensor.lng}</span>
+                                <span>{sensor.lat}, {sensor.lon}</span>
                               )}
                             </div>
-                            <p className="text-xs text-muted-foreground">Type: {sensor.sensorType} · Registered: {sensor.registeredAt}</p>
+                            <p className="text-xs text-muted-foreground">Type: {sensor.sensor_type} · Registered: {new Date(sensor.registered_at).toLocaleDateString()}</p>
                           </div>
                           {editingId !== sensor.id && (
                             <Button
                               variant="outline"
                               size="sm"
-                              onClick={() => { setEditingId(sensor.id); setNewLat(sensor.lat); setNewLng(sensor.lng); }}
+                              onClick={() => { setEditingId(sensor.id); setNewLat(String(sensor.lat)); setNewLng(String(sensor.lon)); }}
                             >
                               <Edit className="w-3.5 h-3.5 mr-1" /> Update Location
                             </Button>
@@ -716,11 +846,14 @@ const UserDashboard = () => {
                         <Input value={shippingCountry} onChange={(e) => setShippingCountry(e.target.value)} placeholder="Country" className="bg-background" />
                       </div>
                       <Button
-                        onClick={() => { handlePurchase(); setAdditionalOrderStatus("shipping"); }}
-                        disabled={!shippingAddress || !shippingCity || !shippingCountry || !shippingZip}
+                        onClick={async () => {
+                          const created = await handlePurchase();
+                          if (created) setAdditionalOrderStatus("shipping");
+                        }}
+                        disabled={!shippingAddress || !shippingCity || !shippingCountry || !shippingZip || isPurchaseBusy}
                         className="eco-gradient text-primary-foreground hover:opacity-90 border-0"
                       >
-                        Pay 0.05 ETH & Order <ArrowRight className="w-4 h-4 ml-1" />
+                        {isPurchaseBusy ? "Confirming order..." : <>Pay 0.05 ETH & Order <ArrowRight className="w-4 h-4 ml-1" /></>}
                       </Button>
                     </CardContent>
                   </Card>
@@ -742,25 +875,9 @@ const UserDashboard = () => {
                     </motion.div>
                     <h3 className="text-xl font-serif text-foreground">Your New Sensor Is On Its Way!</h3>
                     <p className="text-muted-foreground text-sm max-w-md mx-auto">
-                      We're preparing your AQ-V2 sensor for shipment. You'll receive a tracking number soon.
+                      We're preparing your AQ-V2 sensor for shipment.
                     </p>
-                    <div className="flex items-center justify-center gap-3">
-                      <div className="flex gap-1">
-                        {[0, 1, 2].map((i) => (
-                          <motion.div
-                            key={i}
-                            animate={{ opacity: [0.3, 1, 0.3] }}
-                            transition={{ repeat: Infinity, duration: 1.5, delay: i * 0.3 }}
-                            className="w-2 h-2 rounded-full bg-primary"
-                          />
-                        ))}
-                      </div>
-                      <span className="text-sm text-muted-foreground">Shipping in progress</span>
-                    </div>
-                    <Button
-                      onClick={() => setAdditionalOrderStatus("arrived")}
-                      variant="outline"
-                    >
+                    <Button onClick={() => setAdditionalOrderStatus("arrived")} variant="outline" className="mx-auto">
                       <CheckCircle className="w-4 h-4 mr-2" /> I Received My Sensor
                     </Button>
                   </CardContent>
@@ -768,30 +885,37 @@ const UserDashboard = () => {
               </motion.div>
             )}
 
-            {/* Register sensor — shown after arrival (initial or additional) */}
-            {(additionalOrderStatus === "arrived" || additionalOrderStatus === "none") && (
-              <Card className="bg-card border-border">
-                <CardHeader>
-                  <CardTitle className="font-serif text-xl">Register a New Sensor</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium text-foreground">6-Digit Activation Code</label>
-                    <Input value={activationCode} onChange={(e) => setActivationCode(e.target.value.replace(/\D/g, "").slice(0, 6))} placeholder="e.g. 482901" maxLength={6} className="bg-background" />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium text-foreground">Deployment Location</label>
-                    <LocationPicker lat={regLat} lng={regLng} onLatChange={setRegLat} onLngChange={setRegLng} />
-                  </div>
-                  <Button
-                    onClick={handleRegister}
-                    disabled={activationCode.length !== 6 || !regLat || !regLng || isRegistering || isRegisterConfirming}
-                    className="eco-gradient text-primary-foreground hover:opacity-90 border-0"
-                  >
-                    {isRegistering ? "Confirm..." : isRegisterConfirming ? "Confirming..." : "Register Sensor"}
-                  </Button>
-                </CardContent>
-              </Card>
+            {/* Buy another — arrived, register */}
+            {additionalOrderStatus === "arrived" && (
+              <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
+                <Card className="bg-card border-border">
+                  <CardHeader>
+                    <CardTitle className="font-serif text-xl">Register Your New Sensor</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-4 max-w-lg">
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium text-foreground">Activation Code</label>
+                      <Input value={activationCode} onChange={(e) => setActivationCode(e.target.value.replace(/\D/g, "").slice(0, 6))} placeholder="6-digit code from packaging" maxLength={6} className="bg-background" />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium text-foreground">Sensor Deployment Location</label>
+                      <LocationPicker lat={regLat} lng={regLng} onLatChange={setRegLat} onLngChange={setRegLng} />
+                    </div>
+                    <Button
+                      onClick={handleRegister}
+                      disabled={activationCode.length !== 6 || !regLat || !regLng || isRegistering || isRegisterConfirming}
+                      className="w-full eco-gradient text-primary-foreground hover:opacity-90 border-0"
+                    >
+                      {isRegistering ? "Confirm..." : isRegisterConfirming ? "Confirming..." : "Register Sensor"}
+                    </Button>
+                    {!canRegisterDevice && (
+                      <p className="text-xs text-muted-foreground">
+                        This on-chain registration step currently requires a wallet with the contract admin role.
+                      </p>
+                    )}
+                  </CardContent>
+                </Card>
+              </motion.div>
             )}
           </>
         )}

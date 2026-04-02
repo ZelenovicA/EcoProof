@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
-import { Shield, Coins, Power, Upload, AlertTriangle } from "lucide-react";
+import { AlertTriangle, Coins, Lock, Power, Shield, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -8,9 +8,11 @@ import { Badge } from "@/components/ui/badge";
 import { useAccount, useReadContract, useWriteContract, useWaitForTransactionReceipt } from "wagmi";
 import { ConnectButton } from "@rainbow-me/rainbowkit";
 import { formatEther, hexToString, zeroAddress, zeroHash, parseEther } from "viem";
+import { baseSepolia } from "wagmi/chains";
 import { toast } from "sonner";
 import { ECOPROOF_CONTRACT_ADDRESS, ECOPROOF_ABI, IS_CONTRACT_CONFIGURED } from "@/config/contract";
 import { contractService } from "@/services/contractService";
+import { chainApi, rewardApi, type MerkleTreeDTO } from "@/services/apiClient";
 
 const isBytes32 = (value: string) => /^0x[a-fA-F0-9]{64}$/.test(value);
 
@@ -34,11 +36,8 @@ const Admin = () => {
   const [ipfsCID, setIpfsCID] = useState("");
   const [buybackPrice, setBuybackPrice] = useState("");
   const [deviceIdInput, setDeviceIdInput] = useState("");
-  
-  const [pendingDeviceToggle, setPendingDeviceToggle] = useState<{
-    deviceId: `0x${string}`;
-    nextActive: boolean;
-  } | null>(null);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [generatedEpoch, setGeneratedEpoch] = useState<MerkleTreeDTO | null>(null);
 
   const normalizedDeviceId = useMemo(() => {
     const trimmed = deviceIdInput.trim();
@@ -60,7 +59,7 @@ const Admin = () => {
     query: { enabled: IS_CONTRACT_CONFIGURED },
   });
 
-  const { data: hasAdminRole } = useReadContract({
+  const { data: hasAdminRole, isLoading: isAdminRoleLoading } = useReadContract({
     address: ECOPROOF_CONTRACT_ADDRESS,
     abi: ECOPROOF_ABI,
     functionName: "hasRole",
@@ -93,23 +92,82 @@ const Admin = () => {
   const selectedSensorTypeRaw = (selectedDevice as any)?.[3];
   const selectedLatitude = (selectedDevice as any)?.[4];
   const selectedLongitude = (selectedDevice as any)?.[5];
+  const isAdmin = !!hasAdminRole;
+  const isDeviceActionLoading = isDevicePending || isDeviceConfirming;
+
+  useEffect(() => {
+    if (!isMerkleConfirmed || !generatedEpoch || !ipfsCID || !merkleHash) return;
+
+    Promise.allSettled([
+      rewardApi.updateEpochIpfs(generatedEpoch.epoch_id, ipfsCID, merkleHash),
+      chainApi.sync(),
+    ]);
+  }, [generatedEpoch, ipfsCID, isMerkleConfirmed, merkleHash]);
+
+  useEffect(() => {
+    if (!isDeviceConfirmed) return;
+    chainApi.sync().catch(() => undefined);
+  }, [isDeviceConfirmed]);
+
+  // ── Not connected ──
+  if (!isConnected) {
+    return (
+      <div className="min-h-screen pt-16 flex items-center justify-center">
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="eco-card max-w-md w-full text-center space-y-6">
+          <div className="w-16 h-16 rounded-2xl eco-gradient flex items-center justify-center mx-auto">
+            <Shield className="w-7 h-7 text-primary-foreground" />
+          </div>
+          <h1 className="text-3xl font-serif text-foreground">Admin Access</h1>
+          <p className="text-muted-foreground">Connect with an admin wallet to access the management panel.</p>
+          <div className="flex justify-center"><ConnectButton /></div>
+        </motion.div>
+      </div>
+    );
+  }
+
+  if (IS_CONTRACT_CONFIGURED && address && isAdminRoleLoading) {
+    return (
+      <div className="min-h-screen pt-16 flex items-center justify-center">
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="eco-card max-w-md w-full text-center space-y-6">
+          <div className="w-16 h-16 rounded-2xl eco-gradient flex items-center justify-center mx-auto">
+            <Shield className="w-7 h-7 text-primary-foreground" />
+          </div>
+          <h1 className="text-3xl font-serif text-foreground">Checking Admin Access</h1>
+          <p className="text-muted-foreground">Verifying the connected wallet against the EcoProof contract.</p>
+        </motion.div>
+      </div>
+    );
+  }
+
+  // ── Not admin ──
+  if (!isAdmin) {
+    return (
+      <div className="min-h-screen pt-16 flex items-center justify-center">
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="eco-card max-w-md w-full text-center space-y-6">
+          <div className="w-16 h-16 rounded-2xl bg-destructive/10 flex items-center justify-center mx-auto">
+            <Lock className="w-7 h-7 text-destructive" />
+          </div>
+          <h1 className="text-3xl font-serif text-foreground">Access Denied</h1>
+          <p className="text-muted-foreground">
+            The connected wallet <code className="text-xs font-mono text-foreground">{address?.slice(0, 6)}...{address?.slice(-4)}</code> does not have admin privileges on the EcoProof contract.
+          </p>
+          <div className="flex justify-center"><ConnectButton /></div>
+        </motion.div>
+      </div>
+    );
+  }
 
   // Merkle Root
   const handleSetMerkleRoot = async () => {
     if (!merkleRoot || !ipfsCID || !address || !IS_CONTRACT_CONFIGURED) return;
     try {
       await setMerkleRootAsync({
-        address: ECOPROOF_CONTRACT_ADDRESS,
-        abi: ECOPROOF_ABI,
-        functionName: "setMerkleRoot",
-        args: [merkleRoot as `0x${string}`, ipfsCID],
+        address: ECOPROOF_CONTRACT_ADDRESS, abi: ECOPROOF_ABI,
+        functionName: "setMerkleRoot", args: [merkleRoot as `0x${string}`, ipfsCID],
+        account: address, chain: baseSepolia,
       });
       toast.message("Merkle root transaction submitted.");
-      setMerkleRoot("");
-      setIpfsCID("");
-    } catch (error) {
-      toast.error(contractService.parseError(error));
-    }
+    } catch (error) { toast.error(contractService.parseError(error)); }
   };
 
   // Buyback Price
@@ -117,76 +175,50 @@ const Admin = () => {
     if (!buybackPrice || !address || !IS_CONTRACT_CONFIGURED) return;
     try {
       await setBuybackPriceAsync({
-        address: ECOPROOF_CONTRACT_ADDRESS,
-        abi: ECOPROOF_ABI,
-        functionName: "setBuybackPricePerToken",
-        args: [parseEther(buybackPrice)],
+        address: ECOPROOF_CONTRACT_ADDRESS, abi: ECOPROOF_ABI,
+        functionName: "setBuybackPricePerToken", args: [parseEther(buybackPrice)],
+        account: address, chain: baseSepolia,
       });
       toast.message("Buyback price update transaction submitted.");
       setBuybackPrice("");
-    } catch (error) {
-      toast.error(contractService.parseError(error));
-    }
+    } catch (error) { toast.error(contractService.parseError(error)); }
   };
 
   // Device Toggle
+
   const handleToggleDevice = async () => {
-    if (!normalizedDeviceId) {
-      toast.error("Enter a valid bytes32 device ID.");
-      return;
-    }
-    if (!deviceExists) {
-      toast.error("Device is not registered on-chain.");
-      return;
-    }
+    if (!normalizedDeviceId) { toast.error("Enter a valid bytes32 device ID."); return; }
+    if (!deviceExists) { toast.error("Device is not registered on-chain."); return; }
     if (!address || !IS_CONTRACT_CONFIGURED) return;
-    
-    const nextActive = !selectedActive;
     try {
-      setPendingDeviceToggle({ deviceId: normalizedDeviceId, nextActive });
       await setDeviceActiveAsync({
-        address: ECOPROOF_CONTRACT_ADDRESS,
-        abi: ECOPROOF_ABI,
-        functionName: "setDeviceActive",
-        args: [normalizedDeviceId, nextActive],
+        address: ECOPROOF_CONTRACT_ADDRESS, abi: ECOPROOF_ABI,
+        functionName: "setDeviceActive", args: [normalizedDeviceId, !selectedActive],
+        account: address, chain: baseSepolia,
       });
       toast.message("Device status transaction submitted.");
+    } catch (error) { toast.error(contractService.parseError(error)); }
+  };
+
+  const handleGenerateTree = async () => {
+    setIsGenerating(true);
+    try {
+      const result = await rewardApi.generateTree({ pinToIpfs: true });
+      setGeneratedEpoch(result);
+      setMerkleRoot(result.merkle_root);
+      setIpfsCID(result.ipfs_cid || "");
+      toast.success(
+        result.ipfs_cid
+          ? `Tree generated and pinned. CID: ${result.ipfs_cid.slice(0, 12)}...`
+          : "Tree generated. Add an IPFS CID before submitting on-chain.",
+      );
     } catch (error) {
-      toast.error(contractService.parseError(error));
+      toast.error(error instanceof Error ? error.message : "Failed to generate tree");
     } finally {
-      setPendingDeviceToggle(null);
+      setIsGenerating(false);
     }
   };
 
-  const handleAutoGenerate = () => {
-    setMerkleRoot("0x" + Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join(""));
-    setIpfsCID("Qm" + Array.from({ length: 44 }, () => "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"[Math.floor(Math.random() * 62)]).join(""));
-  };
-
-  const isAdmin = hasAdminRole;
-
-  if (!isConnected) {
-    return (
-      <div className="min-h-screen pt-16 flex items-center justify-center">
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="eco-card max-w-md w-full text-center space-y-6"
-        >
-          <div className="w-16 h-16 rounded-2xl eco-gradient flex items-center justify-center mx-auto">
-            <Shield className="w-7 h-7 text-primary-foreground" />
-          </div>
-          <h1 className="text-3xl font-serif text-foreground">Admin Access</h1>
-          <p className="text-muted-foreground">
-            Connect with an admin wallet to access the management panel.
-          </p>
-          <div className="flex justify-center">
-            <ConnectButton />
-          </div>
-        </motion.div>
-      </div>
-    );
-  }
 
   const formattedBuyback = currentBuybackPrice || "0.0001";
 
@@ -238,8 +270,8 @@ const Admin = () => {
                 </p>
               )}
               <div className="grid grid-cols-2 gap-2">
-                <Button variant="outline" className="w-full" onClick={handleAutoGenerate}>
-                  Auto-Generate
+                <Button variant="outline" className="w-full" onClick={handleGenerateTree}>
+                  {isGenerating ? "Generating..." : "Auto-Generate"}
                 </Button>
                 <Button
                   className="eco-gradient text-primary-foreground hover:opacity-90 border-0 w-full"
@@ -249,6 +281,13 @@ const Admin = () => {
                   {isMerklePending ? "Confirm..." : isMerkleConfirming ? "Confirming..." : isMerkleConfirmed ? "✓ Done" : "Submit On-Chain"}
                 </Button>
               </div>
+              {generatedEpoch && (
+                <div className="text-xs text-muted-foreground space-y-1 bg-muted/30 p-3 rounded-lg">
+                  <p><strong>Epoch #{generatedEpoch.epoch_id}</strong> · {generatedEpoch.num_users} users</p>
+                  <p>Total: {formatEther(BigInt(generatedEpoch.total_rewards))} ECR</p>
+                  <p>{ipfsCID ? <>Pinned to IPFS: <code className="font-mono">{ipfsCID}</code> — submit on-chain.</> : "Uploading to IPFS..."}</p>
+                </div>
+              )}
             </CardContent>
           </Card>
 
@@ -326,10 +365,10 @@ const Admin = () => {
               <Button
                 variant={selectedActive ? "destructive" : "outline"}
                 onClick={handleToggleDevice}
-                disabled={!isAdmin || !deviceExists || isLoading}
+                disabled={!isAdmin || !deviceExists || isDeviceActionLoading}
                 className="w-full sm:w-auto"
               >
-                {selectedActive ? (
+                {isDeviceActionLoading ? "Confirming..." : selectedActive ? (
                   <><AlertTriangle className="w-3.5 h-3.5 mr-1" /> Deactivate</>
                 ) : (
                   <><Power className="w-3.5 h-3.5 mr-1" /> Activate</>

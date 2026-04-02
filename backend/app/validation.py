@@ -268,7 +268,7 @@ def load_sensor_frame(db: Session, start_time: datetime, end_time: datetime) -> 
         )
         .join(Sensor, SensorData.sensor_id == Sensor.id)
         .filter(SensorData.timestamp >= start_time, SensorData.timestamp < end_time)
-        .filter(Sensor.isActive.is_(True))
+        .filter(Sensor.active.is_(True))
     )
     return pd.read_sql(query.statement, db.get_bind())
 

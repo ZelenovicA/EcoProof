@@ -12,6 +12,7 @@ joblib==1.5.3
 numpy==2.4.4
 pandas==3.0.2
 psycopg2-binary==2.9.11
+pycryptodome==3.23.0
 pydantic==2.12.5
 pydantic_core==2.41.5
 python-dateutil==2.9.0.post0

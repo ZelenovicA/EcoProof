@@ -91,6 +91,17 @@ export const ECOPROOF_ABI = [
   {
     inputs: [
       { internalType: "bytes32", name: "deviceId", type: "bytes32" },
+      { internalType: "int256", name: "latitude", type: "int256" },
+      { internalType: "int256", name: "longitude", type: "int256" },
+    ],
+    name: "updateMetadata",
+    outputs: [],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
+  {
+    inputs: [
+      { internalType: "bytes32", name: "deviceId", type: "bytes32" },
       { internalType: "bool", name: "active", type: "bool" },
     ],
     name: "setDeviceActive",

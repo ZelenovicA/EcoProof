@@ -1,18 +1,33 @@
+import json
+import os
+import secrets
 from datetime import datetime, timedelta
 
+import requests
 from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from . import database, models, schemas
+from .chain_listener import ChainListener
 from .models import Sensor, WeeklySensorScore
 from .validation import run_weekly_validation
 
 models.Base.metadata.create_all(bind=database.engine)
+database.ensure_compat_schema()
 
 app = FastAPI(
-    title="MVP EcoProof API",
-    description="API for managing air quality sensors and weekly trust scoring.",
+    title="EcoProof API",
+    description="API for EcoProof sensor, rewards, and blockchain-sync flows.",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -26,6 +41,95 @@ def get_db():
 
 def _normalized_window_end() -> datetime:
     return datetime.utcnow().replace(minute=0, second=0, microsecond=0)
+
+
+def _looks_like_bytes32(value: str | None) -> bool:
+    return bool(value and value.startswith("0x") and len(value) == 66)
+
+
+def _normalize_device_identifier(value: str | None) -> str | None:
+    if not value:
+        return None
+    return value.lower() if _looks_like_bytes32(value) else value
+
+
+def _normalize_wallet_address(value: str | None) -> str | None:
+    return value.lower() if value else None
+
+
+def _find_sensor_by_device_identifier(db: Session, identifier: str | None) -> models.Sensor | None:
+    normalized = _normalize_device_identifier(identifier)
+    if normalized is None:
+        return None
+
+    if _looks_like_bytes32(normalized):
+        return (
+            db.query(models.Sensor)
+            .filter(
+                (models.Sensor.device_id == normalized)
+                | (models.Sensor.device_id_hash == normalized)
+            )
+            .first()
+        )
+
+    return (
+        db.query(models.Sensor)
+        .filter(
+            (models.Sensor.device_id == normalized)
+            | (models.Sensor.activation_code == normalized)
+        )
+        .first()
+    )
+
+
+def _ensure_user_record(db: Session, wallet_address: str) -> None:
+    normalized_wallet = _normalize_wallet_address(wallet_address)
+    if not normalized_wallet:
+        return
+
+    existing = db.query(models.User).filter(func.lower(models.User.wallet_address) == normalized_wallet).first()
+    if existing is None:
+        db.add(models.User(wallet_address=normalized_wallet))
+        db.flush()
+
+
+def _generate_activation_code(db: Session) -> str:
+    for _ in range(100):
+        code = f"{secrets.randbelow(1_000_000):06d}"
+        existing_order = (
+            db.query(models.SensorOrder.id)
+            .filter(models.SensorOrder.activation_code == code)
+            .first()
+        )
+        existing_sensor = (
+            db.query(models.Sensor.id)
+            .filter(models.Sensor.activation_code == code)
+            .first()
+        )
+        if existing_order is None and existing_sensor is None:
+            return code
+
+    raise HTTPException(status_code=500, detail="Could not generate a unique activation code.")
+
+
+def _assign_missing_order_activation_codes(db: Session) -> int:
+    orders = (
+        db.query(models.SensorOrder)
+        .filter(
+            (models.SensorOrder.activation_code.is_(None))
+            | (models.SensorOrder.activation_code == "")
+        )
+        .order_by(models.SensorOrder.id.asc())
+        .all()
+    )
+
+    for order in orders:
+        order.activation_code = _generate_activation_code(db)
+
+    if orders:
+        db.commit()
+
+    return len(orders)
 
 
 def _ensure_weekly_scores(db: Session, days: int, refresh: bool) -> tuple[datetime, datetime] | None:
@@ -74,53 +178,546 @@ def _serialize_weekly_score(score: WeeklySensorScore) -> dict:
     }
 
 
+def _build_epoch_response(epoch: models.MerkleEpoch, allocations: list[models.RewardAllocation]) -> schemas.MerkleTreeResponse:
+    ipfs_json = {
+        "merkle_root": epoch.merkle_root,
+        "total_rewards": epoch.total_rewards or "0",
+        "num_users": len(allocations),
+        "allocations": [
+            {
+                "wallet_address": allocation.wallet_address,
+                "cumulative_amount": allocation.cumulative_amount,
+                "proof": json.loads(allocation.proof),
+            }
+            for allocation in allocations
+        ],
+    }
+    return schemas.MerkleTreeResponse(
+        epoch_id=epoch.id,
+        merkle_root=epoch.merkle_root,
+        ipfs_json=ipfs_json,
+        total_rewards=epoch.total_rewards or "0",
+        num_users=len(allocations),
+        ipfs_cid=None if epoch.ipfs_cid == "pending" else epoch.ipfs_cid,
+    )
+
+
+def _pin_json_to_ipfs(payload: dict, filename: str) -> str:
+    pinata_url = os.getenv("IPFS_API_URL", "https://api.pinata.cloud/pinning/pinJSONToIPFS")
+    jwt = os.getenv("JWT_PINATA_API_KEY") or os.getenv("PINATA_JWT")
+    api_key = os.getenv("PINATA_API_KEY")
+    api_secret = os.getenv("PINATA_API_SECRET")
+
+    headers = {"Content-Type": "application/json"}
+    if jwt:
+        headers["Authorization"] = f"Bearer {jwt}"
+    elif api_key and api_secret:
+        headers["pinata_api_key"] = api_key
+        headers["pinata_secret_api_key"] = api_secret
+    else:
+        raise HTTPException(status_code=400, detail="Pinata credentials are not configured on the backend.")
+
+    try:
+        response = requests.post(
+            pinata_url,
+            headers=headers,
+            json={
+                "pinataContent": payload,
+                "pinataMetadata": {"name": filename},
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to upload epoch JSON to IPFS: {exc}") from exc
+
+    data = response.json()
+    ipfs_hash = data.get("IpfsHash")
+    if not ipfs_hash:
+        raise HTTPException(status_code=502, detail="Pinata response did not include an IpfsHash.")
+    return ipfs_hash
+
+
+@app.on_event("startup")
+def startup_event() -> None:
+    with database.SessionLocal() as db:
+        _assign_missing_order_activation_codes(db)
+
+    listener = ChainListener(database.SessionLocal)
+    app.state.chain_listener = listener
+    listener.start()
+
+
+@app.on_event("shutdown")
+def shutdown_event() -> None:
+    listener = getattr(app.state, "chain_listener", None)
+    if listener is not None:
+        listener.stop()
+
+
 @app.get("/")
 def read_root():
-    return {"status": "API is active", "message": "Welcome!"}
+    return {"status": "ok", "message": "EcoProof API is active"}
+
+
+@app.get("/health")
+def read_health():
+    return {"status": "ok"}
+
+
+@app.get("/chain/status")
+def get_chain_status(db: Session = Depends(get_db)):
+    listener = getattr(app.state, "chain_listener", None)
+    base_status = listener.status() if listener is not None else {"configured": False, "running": False}
+
+    cursor = None
+    contract_address = base_status.get("contract_address")
+    if contract_address:
+        cursor = (
+            db.query(models.ChainSyncCursor)
+            .filter(models.ChainSyncCursor.contract_address == contract_address)
+            .first()
+        )
+
+    return {
+        **base_status,
+        "last_synced_block": cursor.last_synced_block if cursor is not None else None,
+        "last_synced_at": cursor.updated_at if cursor is not None else None,
+    }
+
+
+@app.post("/chain/sync")
+def run_chain_sync():
+    listener = getattr(app.state, "chain_listener", None)
+    if listener is None:
+        listener = ChainListener(database.SessionLocal)
+        app.state.chain_listener = listener
+    return listener.sync_once()
 
 
 @app.post("/sensors/", response_model=schemas.SensorResponse)
 def register_sensor(sensor: schemas.SensorCreate, db: Session = Depends(get_db)):
-    existing = db.query(models.Sensor).filter(models.Sensor.device_id == sensor.device_id).first()
-    if existing:
-        raise HTTPException(status_code=400, detail="Sensor already exists.")
+    owner_address = _normalize_wallet_address(sensor.owner_address) or sensor.owner_address
+    _ensure_user_record(db, owner_address)
 
-    new_sensor = models.Sensor(
-        device_id=sensor.device_id,
-        lat=sensor.lat,
-        lon=sensor.lon,
-        owner_address=sensor.owner_address,
-        isActive=sensor.isActive if sensor.isActive is not None else True,
-        timestamp_registered=sensor.timestamp_registered,
+    device_id = _normalize_device_identifier(sensor.device_id) or sensor.device_id
+    device_id_hash = _normalize_device_identifier(sensor.device_id_hash) or (
+        device_id if _looks_like_bytes32(device_id) else None
     )
-    db.add(new_sensor)
+
+    existing = _find_sensor_by_device_identifier(db, device_id)
+    if existing is None and device_id_hash and device_id_hash != device_id:
+        existing = _find_sensor_by_device_identifier(db, device_id_hash)
+
+    if existing is None:
+        existing = models.Sensor(
+            device_id=device_id,
+            device_id_hash=device_id_hash,
+            activation_code=sensor.activation_code,
+            active=sensor.active,
+            registered_at=sensor.registered_at,
+            lat=sensor.lat,
+            lon=sensor.lon,
+            owner_address=owner_address,
+            sensor_type=sensor.sensor_type,
+        )
+        db.add(existing)
+    else:
+        existing.device_id_hash = device_id_hash or existing.device_id_hash
+        existing.activation_code = sensor.activation_code or existing.activation_code
+        existing.active = sensor.active
+        existing.lat = sensor.lat
+        existing.lon = sensor.lon
+        existing.owner_address = owner_address
+        existing.sensor_type = sensor.sensor_type or existing.sensor_type
+
     db.commit()
-    db.refresh(new_sensor)
-    return new_sensor
+    db.refresh(existing)
+    return existing
+
+
+@app.get("/sensors/", response_model=list[schemas.SensorResponse])
+def list_sensors(owner_address: str | None = None, db: Session = Depends(get_db)):
+    query = db.query(models.Sensor)
+    if owner_address:
+        query = query.filter(func.lower(models.Sensor.owner_address) == _normalize_wallet_address(owner_address))
+    return query.order_by(models.Sensor.registered_at.desc()).all()
+
+
+@app.get("/sensors/{sensor_id}", response_model=schemas.SensorResponse)
+def get_sensor(sensor_id: int, db: Session = Depends(get_db)):
+    sensor = db.query(models.Sensor).filter(models.Sensor.id == sensor_id).first()
+    if sensor is None:
+        raise HTTPException(status_code=404, detail="Sensor not found.")
+    return sensor
+
+
+@app.patch("/sensors/{sensor_id}", response_model=schemas.SensorResponse)
+def update_sensor(sensor_id: int, update: schemas.SensorUpdate, db: Session = Depends(get_db)):
+    sensor = db.query(models.Sensor).filter(models.Sensor.id == sensor_id).first()
+    if sensor is None:
+        raise HTTPException(status_code=404, detail="Sensor not found.")
+
+    payload = update.model_dump(exclude_unset=True)
+    owner_address = payload.get("owner_address")
+    if owner_address:
+        payload["owner_address"] = _normalize_wallet_address(owner_address)
+        _ensure_user_record(db, owner_address)
+
+    for field, value in payload.items():
+        setattr(sensor, field, value)
+
+    db.commit()
+    db.refresh(sensor)
+    return sensor
 
 
 @app.post("/telemetry/", response_model=schemas.SensorDataResponse)
 def add_telemetry(data: schemas.SensorDataCreate, db: Session = Depends(get_db)):
-    sensor = db.query(models.Sensor).filter(models.Sensor.device_id == data.device_id).first()
-    if not sensor:
-        raise HTTPException(status_code=404, detail="Sensor not found. Please register the sensor first.")
+    sensor = _find_sensor_by_device_identifier(db, data.device_id)
+    if sensor is None:
+        raise HTTPException(status_code=404, detail="Sensor not found. Register first.")
 
-    new_reading = models.SensorData(
-        sensor_id=sensor.id,
-        pm25=data.pm25,
-        pm10=data.pm10,
-    )
-    db.add(new_reading)
+    reading = models.SensorData(sensor_id=sensor.id, pm25=data.pm25, pm10=data.pm10)
+    db.add(reading)
     db.commit()
-    db.refresh(new_reading)
-    return new_reading
+    db.refresh(reading)
+    return reading
+
+
+@app.get("/telemetry/{sensor_id}", response_model=list[schemas.SensorDataResponse])
+def get_telemetry(sensor_id: int, hours: int = 24, db: Session = Depends(get_db)):
+    since = datetime.utcnow() - timedelta(hours=hours)
+    return (
+        db.query(models.SensorData)
+        .filter(models.SensorData.sensor_id == sensor_id, models.SensorData.timestamp >= since)
+        .order_by(models.SensorData.timestamp.desc())
+        .all()
+    )
+
+
+@app.get("/validations/{sensor_id}", response_model=list[schemas.HourlyValidationResponse])
+def get_validations(sensor_id: int, hours: int = 24, db: Session = Depends(get_db)):
+    since = datetime.utcnow() - timedelta(hours=hours)
+    return (
+        db.query(models.HourlyValidation)
+        .filter(
+            models.HourlyValidation.sensor_id == sensor_id,
+            models.HourlyValidation.timestamp_hour >= since,
+        )
+        .order_by(models.HourlyValidation.timestamp_hour.desc())
+        .all()
+    )
+
+
+@app.post("/orders/", response_model=schemas.SensorOrderResponse)
+def create_order(order: schemas.SensorOrderCreate, db: Session = Depends(get_db)):
+    buyer_address = _normalize_wallet_address(order.buyer_address) or order.buyer_address
+    existing = None
+    if order.tx_hash:
+        existing = db.query(models.SensorOrder).filter(models.SensorOrder.tx_hash == order.tx_hash).first()
+
+    if existing is None:
+        existing = models.SensorOrder(
+            buyer_address=buyer_address,
+            shipping_street=order.shipping_street,
+            shipping_city=order.shipping_city,
+            shipping_zip=order.shipping_zip,
+            shipping_country=order.shipping_country,
+            tx_hash=order.tx_hash,
+            amount_eth=order.amount_eth,
+            activation_code=_generate_activation_code(db),
+        )
+        db.add(existing)
+    else:
+        existing.shipping_street = order.shipping_street
+        existing.shipping_city = order.shipping_city
+        existing.shipping_zip = order.shipping_zip
+        existing.shipping_country = order.shipping_country
+        existing.amount_eth = order.amount_eth or existing.amount_eth
+        existing.activation_code = existing.activation_code or _generate_activation_code(db)
+
+    db.commit()
+    db.refresh(existing)
+    return existing
+
+
+@app.get("/orders/", response_model=list[schemas.SensorOrderResponse])
+def list_orders(buyer_address: str | None = None, db: Session = Depends(get_db)):
+    query = db.query(models.SensorOrder)
+    if buyer_address:
+        query = query.filter(func.lower(models.SensorOrder.buyer_address) == _normalize_wallet_address(buyer_address))
+    return query.order_by(models.SensorOrder.created_at.desc()).all()
+
+
+@app.get("/orders/{order_id}", response_model=schemas.SensorOrderResponse)
+def get_order(order_id: int, db: Session = Depends(get_db)):
+    order = db.query(models.SensorOrder).filter(models.SensorOrder.id == order_id).first()
+    if order is None:
+        raise HTTPException(status_code=404, detail="Order not found.")
+    return order
+
+
+@app.patch("/orders/{order_id}", response_model=schemas.SensorOrderResponse)
+def update_order_status(order_id: int, update: schemas.SensorOrderStatusUpdate, db: Session = Depends(get_db)):
+    order = db.query(models.SensorOrder).filter(models.SensorOrder.id == order_id).first()
+    if order is None:
+        raise HTTPException(status_code=404, detail="Order not found.")
+
+    order.status = update.status
+    if update.activation_code is not None:
+        order.activation_code = update.activation_code
+    elif order.activation_code in {None, ""}:
+        order.activation_code = _generate_activation_code(db)
+
+    db.commit()
+    db.refresh(order)
+    return order
+
+
+@app.post("/subscriptions/", response_model=schemas.ApiSubscriptionResponse)
+def create_subscription(sub: schemas.ApiSubscriptionCreate, db: Session = Depends(get_db)):
+    now = datetime.utcnow()
+    wallet_address = _normalize_wallet_address(sub.wallet_address) or sub.wallet_address
+    _ensure_user_record(db, wallet_address)
+    existing = (
+        db.query(models.ApiSubscription)
+        .filter(
+            func.lower(models.ApiSubscription.wallet_address) == wallet_address,
+            models.ApiSubscription.status == models.SubscriptionStatus.ACTIVE,
+        )
+        .first()
+    )
+
+    if existing is None:
+        existing = models.ApiSubscription(
+            wallet_address=wallet_address,
+            plan=models.SubscriptionPlan(sub.plan.value),
+            api_key=f"ecr_{secrets.token_hex(16)}",
+            tx_hash=sub.tx_hash,
+            subscribed_at=now,
+            expires_at=now + timedelta(days=30),
+            status=models.SubscriptionStatus.ACTIVE,
+        )
+        db.add(existing)
+    else:
+        existing.plan = models.SubscriptionPlan(sub.plan.value)
+        existing.tx_hash = sub.tx_hash or existing.tx_hash
+        existing.subscribed_at = now
+        existing.expires_at = now + timedelta(days=30)
+        existing.status = models.SubscriptionStatus.ACTIVE
+
+    db.commit()
+    db.refresh(existing)
+    return existing
+
+
+@app.get("/subscriptions/", response_model=list[schemas.ApiSubscriptionResponse])
+def list_subscriptions(wallet_address: str | None = None, db: Session = Depends(get_db)):
+    query = db.query(models.ApiSubscription)
+    if wallet_address:
+        query = query.filter(func.lower(models.ApiSubscription.wallet_address) == _normalize_wallet_address(wallet_address))
+    return query.order_by(models.ApiSubscription.subscribed_at.desc()).all()
+
+
+@app.get("/subscriptions/{sub_id}", response_model=schemas.ApiSubscriptionResponse)
+def get_subscription(sub_id: int, db: Session = Depends(get_db)):
+    subscription = db.query(models.ApiSubscription).filter(models.ApiSubscription.id == sub_id).first()
+    if subscription is None:
+        raise HTTPException(status_code=404, detail="Subscription not found.")
+    return subscription
+
+
+@app.patch("/subscriptions/{sub_id}", response_model=schemas.ApiSubscriptionResponse)
+def update_subscription(sub_id: int, update: schemas.ApiSubscriptionUpdate, db: Session = Depends(get_db)):
+    subscription = db.query(models.ApiSubscription).filter(models.ApiSubscription.id == sub_id).first()
+    if subscription is None:
+        raise HTTPException(status_code=404, detail="Subscription not found.")
+
+    payload = update.model_dump(exclude_unset=True)
+    if "plan" in payload and payload["plan"] is not None:
+        payload["plan"] = models.SubscriptionPlan(payload["plan"])
+    if "status" in payload and payload["status"] is not None:
+        payload["status"] = models.SubscriptionStatus(payload["status"])
+
+    for field, value in payload.items():
+        setattr(subscription, field, value)
+
+    db.commit()
+    db.refresh(subscription)
+    return subscription
+
+
+@app.get("/scores/", response_model=list[schemas.UserScoreResponse])
+def list_scores(db: Session = Depends(get_db)):
+    return db.query(models.UserScore).order_by(models.UserScore.score.desc()).all()
+
+
+@app.get("/scores/{wallet_address}", response_model=schemas.UserScoreResponse)
+def get_score(wallet_address: str, db: Session = Depends(get_db)):
+    normalized_wallet = _normalize_wallet_address(wallet_address) or wallet_address
+    score = db.query(models.UserScore).filter(func.lower(models.UserScore.wallet_address) == normalized_wallet).first()
+    if score is None:
+        raise HTTPException(status_code=404, detail="No score found for this wallet.")
+    return score
+
+
+@app.patch("/scores/{wallet_address}", response_model=schemas.UserScoreResponse)
+def update_score(wallet_address: str, update: schemas.UserScoreUpdate, db: Session = Depends(get_db)):
+    normalized_wallet = _normalize_wallet_address(wallet_address) or wallet_address
+    score = db.query(models.UserScore).filter(func.lower(models.UserScore.wallet_address) == normalized_wallet).first()
+    if score is None:
+        score = models.UserScore(wallet_address=normalized_wallet, score=0.0, cumulative_amount="0")
+        db.add(score)
+
+    for field, value in update.model_dump(exclude_unset=True).items():
+        setattr(score, field, value)
+
+    db.commit()
+    db.refresh(score)
+    return score
+
+
+@app.post("/rewards/epochs/", response_model=schemas.MerkleEpochResponse)
+def create_epoch(epoch: schemas.MerkleEpochCreate, db: Session = Depends(get_db)):
+    existing = db.query(models.MerkleEpoch).filter(models.MerkleEpoch.merkle_root == epoch.merkle_root).first()
+    if existing is not None:
+        return existing
+
+    created = models.MerkleEpoch(
+        merkle_root=epoch.merkle_root,
+        ipfs_cid=epoch.ipfs_cid,
+        tx_hash=epoch.tx_hash,
+        total_rewards=epoch.total_rewards,
+    )
+    db.add(created)
+    db.commit()
+    db.refresh(created)
+    return created
+
+
+@app.get("/rewards/epochs/", response_model=list[schemas.MerkleEpochResponse])
+def list_epochs(db: Session = Depends(get_db)):
+    return db.query(models.MerkleEpoch).order_by(models.MerkleEpoch.created_at.desc()).all()
+
+
+@app.post("/rewards/allocations/", response_model=schemas.RewardAllocationResponse)
+def create_allocation(alloc: schemas.RewardAllocationCreate, db: Session = Depends(get_db)):
+    wallet_address = _normalize_wallet_address(alloc.wallet_address) or alloc.wallet_address
+    existing = (
+        db.query(models.RewardAllocation)
+        .filter(
+            models.RewardAllocation.epoch_id == alloc.epoch_id,
+            func.lower(models.RewardAllocation.wallet_address) == wallet_address,
+        )
+        .first()
+    )
+    if existing is None:
+        existing = models.RewardAllocation(
+            epoch_id=alloc.epoch_id,
+            wallet_address=wallet_address,
+            cumulative_amount=alloc.cumulative_amount,
+            proof=alloc.proof,
+        )
+        db.add(existing)
+        db.commit()
+        db.refresh(existing)
+    return existing
+
+
+@app.get("/rewards/{wallet_address}", response_model=schemas.UserRewardInfo)
+def get_user_reward(wallet_address: str, db: Session = Depends(get_db)):
+    normalized_wallet = _normalize_wallet_address(wallet_address) or wallet_address
+    latest_epoch = db.query(models.MerkleEpoch).order_by(models.MerkleEpoch.id.desc()).first()
+    if latest_epoch is None:
+        raise HTTPException(status_code=404, detail="No reward epochs found.")
+
+    allocation = (
+        db.query(models.RewardAllocation)
+        .filter(
+            models.RewardAllocation.epoch_id == latest_epoch.id,
+            func.lower(models.RewardAllocation.wallet_address) == normalized_wallet,
+        )
+        .first()
+    )
+    if allocation is None:
+        raise HTTPException(status_code=404, detail="No allocation found for this wallet.")
+
+    return schemas.UserRewardInfo(
+        wallet_address=allocation.wallet_address,
+        cumulative_amount=allocation.cumulative_amount,
+        proof=json.loads(allocation.proof),
+        merkle_root=latest_epoch.merkle_root,
+        already_claimed=allocation.claimed,
+    )
+
+
+@app.post("/rewards/generate-tree", response_model=schemas.MerkleTreeResponse)
+def generate_merkle_tree(pin_to_ipfs: bool = False, db: Session = Depends(get_db)):
+    from .merkle_tree import generate_epoch
+
+    scores = db.query(models.UserScore).filter(models.UserScore.cumulative_amount != "0").all()
+    if not scores:
+        raise HTTPException(status_code=400, detail="No user scores available to build a Merkle tree.")
+
+    users = [{"wallet_address": score.wallet_address, "cumulative_amount": score.cumulative_amount} for score in scores]
+    result = generate_epoch(users)
+
+    epoch = db.query(models.MerkleEpoch).filter(models.MerkleEpoch.merkle_root == result["merkle_root"]).first()
+    if epoch is None:
+        epoch = models.MerkleEpoch(
+            merkle_root=result["merkle_root"],
+            ipfs_cid="pending",
+            total_rewards=result["total_rewards"],
+        )
+        db.add(epoch)
+        db.flush()
+
+        for allocation in result["allocations"]:
+            db.add(
+                models.RewardAllocation(
+                    epoch_id=epoch.id,
+                    wallet_address=allocation["wallet_address"],
+                    cumulative_amount=allocation["cumulative_amount"],
+                    proof=json.dumps(allocation["proof"]),
+                )
+            )
+
+        db.commit()
+        db.refresh(epoch)
+
+    allocations = (
+        db.query(models.RewardAllocation)
+        .filter(models.RewardAllocation.epoch_id == epoch.id)
+        .order_by(models.RewardAllocation.wallet_address.asc())
+        .all()
+    )
+
+    if pin_to_ipfs and epoch.ipfs_cid == "pending":
+        epoch_json = _build_epoch_response(epoch, allocations).ipfs_json
+        epoch.ipfs_cid = _pin_json_to_ipfs(epoch_json, f"ecoproof_epoch_{epoch.id}.json")
+        db.commit()
+        db.refresh(epoch)
+
+    return _build_epoch_response(epoch, allocations)
+
+
+@app.patch("/rewards/epochs/{epoch_id}/ipfs")
+def update_epoch_ipfs(epoch_id: int, ipfs_cid: str, tx_hash: str | None = None, db: Session = Depends(get_db)):
+    epoch = db.query(models.MerkleEpoch).filter(models.MerkleEpoch.id == epoch_id).first()
+    if epoch is None:
+        raise HTTPException(status_code=404, detail="Epoch not found.")
+
+    epoch.ipfs_cid = ipfs_cid
+    if tx_hash:
+        epoch.tx_hash = tx_hash
+
+    db.commit()
+    return {"status": "updated"}
 
 
 @app.post("/api/validation/run-weekly", response_model=schemas.ValidationRunResponse)
-def run_validation_job(
-    days: int = Query(7, ge=1, le=30),
-    db: Session = Depends(get_db),
-):
+def run_validation_job(days: int = Query(7, ge=1, le=30), db: Session = Depends(get_db)):
     result = run_weekly_validation(days=days, db=db, persist=True)
     return {
         "week_start": result["week_start"],
@@ -139,10 +736,11 @@ def get_weekly_scores(
 ):
     window = _ensure_weekly_scores(db, days=days, refresh=refresh)
     if window is None:
+        now = datetime.utcnow()
         return {
-            "generated_at": datetime.utcnow(),
-            "week_start": datetime.utcnow(),
-            "week_end": datetime.utcnow(),
+            "generated_at": now,
+            "week_start": now,
+            "week_end": now,
             "sensor_count": 0,
             "sensors": [],
         }
@@ -200,7 +798,7 @@ def get_weekly_reward(
     refresh: bool = False,
     db: Session = Depends(get_db),
 ):
-    WEEKLY_ERC_POOL = 100000.0
+    weekly_erc_pool = 100000.0
 
     window = _ensure_weekly_scores(db, days=days, refresh=refresh)
     if window is None:
@@ -231,24 +829,21 @@ def get_weekly_reward(
         or 1
     )
 
-    pool_per_location = WEEKLY_ERC_POOL / total_locations
-    sensors_in_my_cluster = max(score.cluster_size, 1)
-    max_reward_per_sensor = pool_per_location / sensors_in_my_cluster
+    pool_per_location = weekly_erc_pool / total_locations
+    sensors_in_cluster = max(score.cluster_size, 1)
+    max_reward_per_sensor = pool_per_location / sensors_in_cluster
     reward_multiplier = score.trust_score / 100.0
     earned_erc = max_reward_per_sensor * reward_multiplier
 
     return {
         "device_id": score.sensor.device_id,
-        "week_window": {
-            "week_start": week_start,
-            "week_end": week_end,
-        },
+        "week_window": {"week_start": week_start, "week_end": week_end},
         "network_stats": {
             "total_locations": total_locations,
             "pool_per_location": round(pool_per_location, 2),
         },
         "sensor_stats": {
-            "sensors_at_this_location": sensors_in_my_cluster,
+            "sensors_at_this_location": sensors_in_cluster,
             "weekly_trust_score": f"{round(score.trust_score, 2)}%",
             "trusted_reading_ratio": round(score.trusted_readings / score.total_readings, 4)
             if score.total_readings
@@ -258,7 +853,7 @@ def get_weekly_reward(
         },
         "payout": {
             "earned_erc": round(earned_erc, 2),
-            "currency": "ERC",
+            "currency": "ECR",
             "network": "Base",
             "destination_address": score.sensor.owner_address,
             "reward_multiplier": round(reward_multiplier, 4),

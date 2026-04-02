@@ -1,23 +1,39 @@
 import { getDefaultConfig } from "@rainbow-me/rainbowkit";
-import { base, sepolia } from "wagmi/chains";
-import { createPublicClient, createWalletClient, http } from "viem";
+import { createPublicClient, createWalletClient, custom, http } from "viem";
+import { baseSepolia } from "wagmi/chains";
+
+declare global {
+  interface Window {
+    ethereum?: unknown;
+  }
+}
+
+export const supportedChain = baseSepolia;
+
+const rpcUrl = import.meta.env.VITE_RPC_URL || undefined;
 
 export const config = getDefaultConfig({
   appName: "EcoProof",
-  projectId: "ecoproof-demo",
-  chains: [sepolia, base],
+  projectId: import.meta.env.VITE_WALLETCONNECT_PROJECT_ID || "ecoproof-demo",
+  chains: [supportedChain],
   ssr: false,
+  transports: {
+    [supportedChain.id]: http(rpcUrl),
+  },
 });
-
-// Create public and wallet clients for direct contract calls
-const rpcUrl = "";
 
 export const publicClient = createPublicClient({
-  chain: sepolia,
-  transport: http(rpcUrl || undefined),
+  chain: supportedChain,
+  transport: http(rpcUrl),
 });
 
-export const walletClient = createWalletClient({
-  chain: sepolia,
-  transport: http(rpcUrl || undefined),
-});
+export const getWalletClient = () => {
+  if (typeof window === "undefined" || !window.ethereum) {
+    throw new Error("No injected wallet found");
+  }
+
+  return createWalletClient({
+    chain: supportedChain,
+    transport: custom(window.ethereum),
+  });
+};

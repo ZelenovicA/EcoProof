@@ -114,7 +114,7 @@ contract EcoRewardToken is ERC20, AccessControl {
         require(devices[deviceId].owner == msg.sender || hasRole(DEFAULT_ADMIN_ROLE, msg.sender), "Not the owner");
 
         devices[deviceId].latitude = latitude;
-        devices[deviceId].latitude = longitude;
+        devices[deviceId].longitude = longitude;
 
         emit MetadataUpdated(deviceId, msg.sender, latitude, longitude);
     }
