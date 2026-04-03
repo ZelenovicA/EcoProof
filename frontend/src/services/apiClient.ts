@@ -18,18 +18,31 @@ function withQuery(path: string, params?: Record<string, string | number | boole
   return query ? `${path}?${query}` : path;
 }
 
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
-    headers: { "Content-Type": "application/json", ...options?.headers },
-    ...options,
-  });
+async function request<T>(path: string, options?: RequestInit & { timeoutMs?: number }): Promise<T> {
+  const timeoutMs = (options as any)?.timeoutMs ?? 30_000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    throw new Error(body.detail || `API error ${response.status}`);
+  try {
+    const { timeoutMs: _, ...fetchOptions } = (options ?? {}) as any;
+    const response = await fetch(`${API_BASE}${path}`, {
+      headers: { "Content-Type": "application/json", ...fetchOptions?.headers },
+      ...fetchOptions,
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.detail || `API error ${response.status}`);
+    }
+    return response.json();
+  } catch (err: any) {
+    if (err.name === "AbortError") {
+      throw new Error("Request timed out – the server is still processing. Try again in a moment.");
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
   }
-
-  return response.json();
 }
 
 export interface SensorDTO {
@@ -211,6 +224,15 @@ export const rewardApi = {
     ),
 };
 
+export interface UserScoreDTO {
+  wallet_address: string;
+  cumulative_amount: string;
+  score: number;
+}
+export const scoreApi = {
+  get: (walletAddress: string) => request<UserScoreDTO>(`/scores/${walletAddress}`),
+};
+
 export const chainApi = {
   status: () => request<ChainStatusDTO>("/chain/status"),
   sync: () =>
@@ -219,87 +241,31 @@ export const chainApi = {
     }),
 };
 
-const PINATA_JWT = import.meta.env.VITE_PINATA_JWT || "";
-
-export const pinataApi = {
-  upload: async (json: Record<string, unknown>, name?: string): Promise<string> => {
-    if (!PINATA_JWT) throw new Error("VITE_PINATA_JWT not configured");
-
-    const response = await fetch("https://api.pinata.cloud/pinning/pinJSONToIPFS", {
+export const autoGenerateApi = {
+  seedAndGenerate: () =>
+    request<MerkleTreeDTO>("/rewards/auto-generate", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${PINATA_JWT}`,
-      },
-      body: JSON.stringify({
-        pinataContent: json,
-        pinataMetadata: { name: name || "ecoproof_epoch.json" },
-      }),
-    });
-
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      throw new Error(body.error?.details || `Pinata error ${response.status}`);
-    }
-
-    const data = await response.json();
-    return data.IpfsHash as string;
-  },
-};
-
-export interface UserScoreDTO {
-  id: number;
-  wallet_address: string;
-  score: number;
-  cumulative_amount: string;
-  updated_at: string | null;
-}
-
-export const scoreApi = {
-  get: (walletAddress: string) => request<UserScoreDTO>(`/scores/${walletAddress}`),
-  list: () => request<UserScoreDTO[]>("/scores/"),
-};
-
-export interface ValidationDTO {
-  id: number;
-  sensor_id: number;
-  timestamp_hour: string;
-  cluster_id: number;
-  avg_pm25: number;
-  avg_pm10: number | null;
-  variance_pm25: number;
-  total_readings: number;
-  valid_readings: number;
-}
-
-export const validationApi = {
-  get: (sensorId: number, hours?: number) =>
-    request<ValidationDTO[]>(withQuery(`/validations/${sensorId}`, { hours })),
-};
-
-export const weeklyRewardApi = {
-  get: (sensorId: number) => request<any>(`/api/sensors/${sensorId}/weekly-reward`),
+      timeoutMs: 120_000,
+    } as any),
 };
 
 export interface PendingRegistrationDTO {
   id: number;
   activation_code: string;
   wallet_address: string;
-  lat: number;
-  lon: number;
   status: "pending" | "approved" | "rejected";
-  order_id: number | null;
+  lat: number | null;
+  lon: number | null;
   created_at: string;
-  updated_at: string;
 }
 export const registrationApi = {
-  create: (data: { activation_code: string; wallet_address: string; lat: number; lon: number }) =>
+  list: (params?: { wallet_address?: string; status?: string }) =>
+    request<PendingRegistrationDTO[]>(withQuery("/registrations/", params)),
+  create: (data: { activation_code: string; wallet_address: string; lat?: number; lon?: number }) =>
     request<PendingRegistrationDTO>("/registrations/", {
       method: "POST",
       body: JSON.stringify(data),
     }),
-  list: (params?: { status?: string; wallet_address?: string }) =>
-    request<PendingRegistrationDTO[]>(withQuery("/registrations/", params)),
   updateStatus: (id: number, status: string) =>
     request<PendingRegistrationDTO>(`/registrations/${id}`, {
       method: "PATCH",

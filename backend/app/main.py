@@ -14,6 +14,8 @@ from .chain_listener import ChainListener
 from .models import Sensor, WeeklySensorScore
 from .validation import run_weekly_validation
 
+pinata_url = os.getenv("IPFS_API_URL", "https://api.pinata.cloud/pinning/pinJSONToIPFS")
+
 models.Base.metadata.create_all(bind=database.engine)
 database.ensure_compat_schema()
 
@@ -201,37 +203,77 @@ def _build_epoch_response(epoch: models.MerkleEpoch, allocations: list[models.Re
         ipfs_cid=None if epoch.ipfs_cid == "pending" else epoch.ipfs_cid,
     )
 
+def _clean_env_secret(value: str | None) -> str | None:
+    if not value:
+        return None
+    cleaned = value.strip().strip('"').strip("'").replace("\n", "").replace("\r", "")
+    return cleaned or None
+def _post_pinata_json(pinata_url: str, headers: dict[str, str], payload: dict, filename: str) -> requests.Response:
+    return requests.post(
+        pinata_url,
+        headers=headers,
+        json={
+            "pinataContent": payload,
+            "pinataMetadata": {"name": filename},
+        },
+        timeout=30,
+    )
 
 def _pin_json_to_ipfs(payload: dict, filename: str) -> str:
-    pinata_url = os.getenv("IPFS_API_URL", "https://api.pinata.cloud/pinning/pinJSONToIPFS")
-    jwt = os.getenv("JWT_PINATA_API_KEY") or os.getenv("PINATA_JWT")
-    api_key = os.getenv("PINATA_API_KEY")
-    api_secret = os.getenv("PINATA_API_SECRET")
+    jwt = _clean_env_secret(os.getenv("PINATA_JWT"))
+    api_key = _clean_env_secret(os.getenv("PINATA_API_KEY"))
+    api_secret = _clean_env_secret(os.getenv("PINATA_API_SECRET"))
 
-    headers = {"Content-Type": "application/json"}
+    auth_attempts: list[tuple[str, dict[str, str]]] = []
     if jwt:
-        headers["Authorization"] = f"Bearer {jwt}"
-    elif api_key and api_secret:
-        headers["pinata_api_key"] = api_key
-        headers["pinata_secret_api_key"] = api_secret
-    else:
+        auth_attempts.append(
+            (
+                "jwt",
+                {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {jwt}",
+                },
+            )
+        )
+    if api_key and api_secret:
+        auth_attempts.append(
+            (
+                "api_key_secret",
+                {
+                    "Content-Type": "application/json",
+                    "pinata_api_key": api_key,
+                    "pinata_secret_api_key": api_secret,
+                },
+            )
+        )
+    if not auth_attempts:
         raise HTTPException(status_code=400, detail="Pinata credentials are not configured on the backend.")
 
     try:
-        response = requests.post(
-            pinata_url,
-            headers=headers,
-            json={
-                "pinataContent": payload,
-                "pinataMetadata": {"name": filename},
-            },
-            timeout=30,
-        )
-        response.raise_for_status()
+        ast_response: requests.Response | None = None
+        last_mode: str | None = None
+        for mode, headers in auth_attempts:
+            print(f"Pinata auth mode: {mode}")
+            response = _post_pinata_json(pinata_url, headers, payload, filename)
+            if response.ok:
+                last_response = response
+                last_mode = mode
+                break
+            print(f"Pinata error via {mode} {response.status_code}: {response.text}")
+            last_response = response
+            last_mode = mode
+            if response.status_code not in {401, 403}:
+                break
+        if last_response is None or not last_response.ok:
+            status_code = 502
+            detail = "Failed to upload epoch JSON to IPFS."
+            if last_response is not None:
+                detail = f"Failed to upload epoch JSON to IPFS via {last_mode}: {last_response.status_code} - {last_response.text}"
+            raise HTTPException(status_code=status_code, detail=detail)
     except requests.RequestException as exc:
         raise HTTPException(status_code=502, detail=f"Failed to upload epoch JSON to IPFS: {exc}") from exc
 
-    data = response.json()
+    data = last_response.json()
     ipfs_hash = data.get("IpfsHash")
     if not ipfs_hash:
         raise HTTPException(status_code=502, detail="Pinata response did not include an IpfsHash.")
@@ -701,6 +743,15 @@ def generate_merkle_tree(pin_to_ipfs: bool = False, db: Session = Depends(get_db
 
     return _build_epoch_response(epoch, allocations)
 
+@app.post("/rewards/auto-generate", response_model=schemas.MerkleTreeResponse)
+def auto_generate(db: Session = Depends(get_db)):
+    """
+    Seed telemetry for 3 test users, compute scores, generate Merkle tree, pin to IPFS.
+    One-click flow for the admin panel.
+    """
+    from .seed_data import seed_and_score
+    seed_and_score(db, days=7)
+    return generate_merkle_tree(pin_to_ipfs=True, db=db)
 
 @app.patch("/rewards/epochs/{epoch_id}/ipfs")
 def update_epoch_ipfs(epoch_id: int, ipfs_cid: str, tx_hash: str | None = None, db: Session = Depends(get_db)):

@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { useAccount, useReadContract, useSendTransaction, useWaitForTransactionReceipt, useWriteContract } from "wagmi";
+import { useAccount, useReadContract, useSendTransaction, useWaitForTransactionReceipt, useWriteContract, useSwitchChain } from "wagmi";
 import { ConnectButton } from "@rainbow-me/rainbowkit";
 import { formatEther, parseEther, zeroHash } from "viem";
 import { baseSepolia } from "wagmi/chains";
@@ -51,7 +51,8 @@ const coordinatesMatch = (sensor: Pick<SensorDTO, "lat" | "lon">, lat: number, l
   Math.abs(sensor.lat - lat) < 0.000001 && Math.abs(sensor.lon - lon) < 0.000001;
 
 const UserDashboard = () => {
-  const { address, isConnected } = useAccount();
+  const { address, isConnected, chainId } = useAccount();
+  const { switchChainAsync } = useSwitchChain();
   // Data from API
   const [sensors, setSensors] = useState<SensorDTO[]>([]);
   const [orders, setOrders] = useState<OrderDTO[]>([]);
@@ -171,10 +172,14 @@ const UserDashboard = () => {
 
     setIsSubmittingOrder(true);
     try {
+      // Ensure wallet is on Base Sepolia before sending
+      if (chainId !== baseSepolia.id) {
+        await switchChainAsync({ chainId: baseSepolia.id });
+      }
       const txHash = await sendTransactionAsync({
         to: ECOPROOF_CONTRACT_ADDRESS,
         value: parseEther("0.00005"),
-        chain: baseSepolia,
+        chainId: baseSepolia.id,
       });
 
       const newOrder = await orderApi.create({

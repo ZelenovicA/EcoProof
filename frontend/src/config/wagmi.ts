@@ -1,12 +1,6 @@
 import { getDefaultConfig } from "@rainbow-me/rainbowkit";
-import { createPublicClient, createWalletClient, custom, http } from "viem";
+import { http } from "viem";
 import { baseSepolia } from "wagmi/chains";
-
-declare global {
-  interface Window {
-    ethereum?: unknown;
-  }
-}
 
 export const supportedChain = baseSepolia;
 
@@ -22,18 +16,3 @@ export const config = getDefaultConfig({
   },
 });
 
-export const publicClient = createPublicClient({
-  chain: supportedChain,
-  transport: http(rpcUrl),
-});
-
-export const getWalletClient = () => {
-  if (typeof window === "undefined" || !window.ethereum) {
-    throw new Error("No injected wallet found");
-  }
-
-  return createWalletClient({
-    chain: supportedChain,
-    transport: custom(window.ethereum),
-  });
-};

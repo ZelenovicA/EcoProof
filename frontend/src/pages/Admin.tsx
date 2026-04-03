@@ -12,8 +12,7 @@ import { baseSepolia } from "wagmi/chains";
 import { toast } from "sonner";
 import { ECOPROOF_CONTRACT_ADDRESS, ECOPROOF_ABI, IS_CONTRACT_CONFIGURED } from "@/config/contract";
 import { contractService } from "@/services/contractService";
-import { chainApi, rewardApi, registrationApi, type MerkleTreeDTO, type PendingRegistrationDTO } from "@/services/apiClient";
-
+import { chainApi, rewardApi, registrationApi, autoGenerateApi, type MerkleTreeDTO, type PendingRegistrationDTO } from "@/services/apiClient";
 const isBytes32 = (value: string) => /^0x[a-fA-F0-9]{64}$/.test(value);
 
 const decodeSensorType = (value: string) => {
@@ -264,14 +263,14 @@ const Admin = () => {
   const handleGenerateTree = async () => {
     setIsGenerating(true);
     try {
-      const result = await rewardApi.generateTree({ pinToIpfs: true });
+      const result = await autoGenerateApi.seedAndGenerate();
       setGeneratedEpoch(result);
       setMerkleRoot(result.merkle_root);
       setIpfsCID(result.ipfs_cid || "");
       toast.success(
         result.ipfs_cid
-          ? `Tree generated and pinned. CID: ${result.ipfs_cid.slice(0, 12)}...`
-          : "Tree generated. Add an IPFS CID before submitting on-chain.",
+          ? `Scores computed, tree generated & pinned. CID: ${result.ipfs_cid.slice(0, 12)}...`
+          : "Tree generated. Configure Pinata to auto-pin.",
       );
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to generate tree");
