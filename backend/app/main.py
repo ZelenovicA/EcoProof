@@ -924,6 +924,21 @@ def update_registration(reg_id: int, update: schemas.PendingRegistrationUpdate, 
     if reg is None:
         raise HTTPException(status_code=404, detail="Registration request not found.")
     reg.status = models.RegistrationStatus(update.status.value)
+     # When approved, create the actual sensor record
+    if update.status.value == "approved":
+        import secrets as _secrets
+        device_id = _secrets.token_hex(16)
+        new_sensor = models.Sensor(
+            device_id=device_id,
+            activation_code=reg.activation_code,
+            lat=reg.lat,
+            lon=reg.lon,
+            owner_address=reg.wallet_address,
+            active=True,
+        )
+        db.add(new_sensor)
+
     db.commit()
     db.refresh(reg)
     return reg
+
